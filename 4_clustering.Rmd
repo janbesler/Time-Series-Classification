@@ -1,0 +1,1010 @@
+---
+title: "clustering"
+author: "Jan Besler"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# libraries
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# libraries
+library(tidyverse)
+library(lubridate)
+library(cluster)
+library(ggplot2)
+library(factoextra)
+library(clusterCrit)
+library(dtwclust)
+```
+
+utilising Taken's Embedding Theorem R
+
+1.  grouping the data in daily/weekly/monthly sets
+2.  draw diagram of clusters
+3.  fine tune the individual clusters
+4.  try to connect all data sets and run one big cluster
+
+# data import
+
+```{r data import}
+set.seed(42)
+
+data_wide <- read_csv("./data/data_wide.csv")
+
+# remove days in lockdown
+  # 1st lockdown 22.03.2020 - 04.05.2020
+data_wide <- data_wide[!(data_wide[["date"]] >= "2020-03-22" & data_wide[["date"]] <= "2020-05-04"),]
+  # 2nd lockdown 16.12.2020 - 08.05.2021
+data_wide <- data_wide[!(data_wide[["date"]] >= "2020-12-16" & data_wide[["date"]] <= "2021-05-08"),]
+
+# split data
+MGH_wide <- data_wide[data_wide$location == "MGH", 2:97]
+FZI_wide <- data_wide[data_wide$location == "FZI", 2:97]
+Hoepfner_wide <- data_wide[data_wide$location == "Hoepfner", 2:97]
+TeFak_wide <- data_wide[data_wide$location == "TechnologieFabrik", 2:97]
+
+# scale each data set individually  - scaling only works column wise, hence transpositioning twice
+data_standardised <- na.omit(rbind(
+  t(scale(t(MGH_wide))),
+  t(scale(t(FZI_wide))),
+  t(scale(t(Hoepfner_wide))),
+  t(scale(t(TeFak_wide)))
+  ))
+write_csv(as.data.frame(data_standardised),
+          "./data/data_standardised.csv")
+write_csv(data_wide,
+          "./data/data_wide.csv")
+```
+
+# optimal K
+
+### ellbow
+
+```{r elbow, eval=FALSE}
+n_clust <- 1:12
+# calculate area of clusters
+wss <- map_dbl(n_clust, ~{kmeans(select(data_wide, -date, -location), ., nstart=50,iter.max = 15 )$tot.withinss})
+  # store results as data frame
+elbow_df <- as.data.frame(cbind("n_clust" = n_clust, "wss" = wss))
+  # visualize results
+ggplot(elbow_df) +
+  geom_line(aes(y = wss, x = n_clust)) +
+  labs(x = "number of clusters", y = "WSS") +
+  theme_minimal()
+```
+
+5 centers looks like it is the furthest away from the line from 1 to 24
+
+### silhouette
+
+pre built functions are used, since there are no easy from scratch manuals except the source code of the packages.
+
+```{r silhouette, eval=FALSE}
+silhouette_function <- function(data){
+# define silhouette function
+silhouette_score <- function(k, data){
+  sil <- silhouette(kmeans(data, centers = k, nstart=25)$cluster,
+                    dist(data))
+  mean(sil[,3])
+}
+# apply function to every hour
+avg_sil <- vector(mode = "numeric", length = length(n_clust) - 1)
+for(i in 2:length(n_clust)){
+  avg_sil[i] <- silhouette_score(i, data)
+}
+# create df to use in ggplot
+avg_sil_df <- as.data.frame(avg_sil)
+avg_sil_df <- cbind(avg_sil_df, n_clust)
+return(avg_sil_df)
+}
+
+
+avg_sil_df <- silhouette_function(MGH_wide)
+
+
+# visualize results
+ggplot(avg_sil_df) +
+  geom_line(aes(y = avg_sil, x = n_clust)) +
+  geom_vline(xintercept = avg_sil_df[avg_sil_df$avg_sil == max(avg_sil_df$avg_sil), 'n_clust'],
+             linetype = "dashed") +
+  labs(x = "number of clusters", y = "average silhouette score") +
+  theme_minimal()
+
+avg_sil_df[avg_sil_df$avg_sil == max(avg_sil_df$avg_sil), 'n_clust']
+
+```
+
+### gap statistics
+
+Again using a pre-built function.
+
+```{r gap, eval=FALSE}
+GapStats <- clusGap(x = MGH_wide,
+        FUNcluster = kmeans,
+        nstart = 25,
+        K.max = length(n_clust),
+        B = 20,
+        iter.max = 20,
+        verbose = TRUE)
+fviz_gap_stat(GapStats)
+```
+
+# clustering functions
+
+### k-means euclidean
+
+```{r k-means}
+k_means_euclidean <- function(data, k_low, k_high) {
+  k_means_evaluation <-
+    as.data.frame(matrix(
+      data = NA,
+      ncol = 5,
+      nrow = 4
+    ))
+  colnames(k_means_evaluation) <- c("evaluation method", "k = 2", "k = 3", "k = 4", "k = 5")
+  k_means_evaluation[, 1] <- c("Silhouette",
+                               "Calinski_Harabasz",
+                               "Davies_Bouldin",
+                               "Dunn")
+  # cluster assignments
+  k_means_cluster <-
+    as.data.frame(matrix(
+      data = NA,
+      ncol = 4,
+      nrow = nrow(data)
+    ))
+  colnames(k_means_cluster) <- c("k = 2", "k = 3", "k = 4", "k = 5")
+  
+  for (i in k_low:k_high) {
+    # run clustering
+    k_means <- tsclust(
+      data,
+      k = i,
+      type = "partitional",      # partition around medoids
+      preproc = zscore,      # z-normalisation
+      distance = "L2",      # shape based distance
+      centroid = "mean",      # partition around mediods
+      seed = 42
+    )
+    # evaluate clustering - internal
+    evaluation <- intCriteria(
+      as.matrix(data),
+      k_means@cluster,
+      c("Silhouette",
+        "Calinski_Harabasz",
+        "Davies_Bouldin",
+        "Dunn")
+    )
+    for (j in 1:length(evaluation)) {
+      k_means_evaluation[j, i] <- evaluation[j]
+    }
+    k_means_cluster[, i - 1] <- k_means@cluster
+  }
+  k_means <- list("cluster" = k_means_cluster, "evaluation" = k_means_evaluation)
+  return(k_means)
+}
+```
+
+### k-mediods euclidean
+
+```{r k_mediods}
+k_mediod_euclidean <- function(data, k_low, k_high) {
+  k_mediod_evaluation <-
+    as.data.frame(matrix(
+      data = NA,
+      ncol = 5,
+      nrow = 4
+    ))
+  colnames(k_mediod_evaluation) <- c("evaluation method", "k = 2", "k = 3", "k = 4", "k = 5")
+  k_mediod_evaluation[, 1] <- c("Silhouette",
+                                "Calinski_Harabasz",
+                                "Davies_Bouldin",
+                                "Dunn")
+  # cluster assignments
+  k_mediod_cluster <-
+    as.data.frame(matrix(
+      data = NA,
+      ncol = 4,
+      nrow = nrow(data)
+    ))
+  colnames(k_mediod_cluster) <- c("k = 2", "k = 3", "k = 4", "k = 5")
+  
+  for (i in k_low:k_high) {
+    # run clustering
+    k_mediod <- tsclust(
+      data,
+      k = i,
+      type = "partitional",      # partition around medoids
+      preproc = zscore,      # z-normalisation
+      distance = "L2",      # euclidean distance
+      centroid = "pam",      # partition around mediods
+      seed = 42
+    )
+    # evaluate clustering - internal
+    evaluation <- intCriteria(
+      as.matrix(data),
+      k_mediod@cluster,
+      c("Silhouette",
+        "Calinski_Harabasz",
+        "Davies_Bouldin",
+        "Dunn")
+    )
+    for (j in 1:length(evaluation)) {k_mediod_evaluation[j, i] <- evaluation[j]}
+    k_mediod_cluster[, i - 1] <- k_mediod@cluster
+  }
+  k_mediod <- list("cluster" = k_mediod_cluster, "evaluation" = k_mediod_evaluation)
+  return(k_mediod)
+}
+```
+
+### c-means euclidean
+
+use the wide data set, since it is required that the data is a matrix with variables as columns and observations as rows.
+
+Set `m = 2` as recommended by *Hathaway and Bezdek 2001*
+
+```{r c-means}
+c_means_euclidean <- function(data, k_low, k_high) {
+  # internal evaluation
+  c_means_evaluation <-
+    as.data.frame(matrix(
+      data = NA,
+      ncol = 5,
+      nrow = 4
+    ))
+  colnames(c_means_evaluation) <- c("evaluation method", "k = 2", "k = 3", "k = 4", "k = 5")
+  c_means_evaluation[, 1] <- c("Silhouette",
+                               "Calinski_Harabasz",
+                               "Davies_Bouldin",
+                               "Dunn")
+  # cluster assignments
+  c_means_cluster <-
+    as.data.frame(matrix(
+      data = NA,
+      ncol = 4,
+      nrow = nrow(data)
+    ))
+  colnames(c_means_cluster) <- c("k = 2", "k = 3", "k = 4", "k = 5")
+  
+  for (i in k_low:k_high) {
+    # run clustering
+    c_means <- tsclust(
+      data,
+      k = i,
+      type = "fuzzy",      # fuzzy clustering
+      preproc = zscore,      # z-normalisation
+      distance = "L2",      # euclidean distance
+      centroid = "fcmdd",      # partition around fuzzy mediods
+      seed = 42
+    )
+    # evaluate clustering - internal
+    evaluation <- intCriteria(
+      as.matrix(data),
+      c_means@cluster,
+      c("Silhouette",
+        "Calinski_Harabasz",
+        "Davies_Bouldin",
+        "Dunn")
+    )
+    for (j in 1:length(evaluation)) {c_means_evaluation[j, i] <- evaluation[j]}
+    c_means_cluster[, i - 1] <- c_means@cluster
+  }
+  c_means <- list("cluster" = c_means_cluster, "evaluation" = c_means_evaluation)
+  return(c_means)
+}
+```
+
+### k-shape dtw
+
+using {dtwclust} for the distance measurements dynamic time warping is utilised
+
+```{r k_dtw}
+k_shape <- function(data, k_low, k_high) {
+  k_dtw_evaluation <-
+    as.data.frame(matrix(
+      data = NA,
+      ncol = 5,
+      nrow = 4
+    ))
+  colnames(k_dtw_evaluation) <- c("evaluation method", "k = 2", "k = 3", "k = 4", "k = 5")
+  k_dtw_evaluation[, 1] <- c("Silhouette",
+                             "Calinski_Harabasz",
+                             "Davies_Bouldin",
+                             "Dunn")
+  # cluster assignments
+  k_dtw_cluster <-
+    as.data.frame(matrix(
+      data = NA,
+      ncol = 4,
+      nrow = nrow(data)
+    ))
+  colnames(k_dtw_cluster) <- c("k = 2", "k = 3", "k = 4", "k = 5")
+  
+  for (i in 2:5) {
+    # run clustering
+    k_dtw <- tsclust(
+      data,
+      k = i,
+      type = "partitional",      # partition around medoids
+      preproc = zscore,      # z-normalisation
+      distance = "sbd",      # shape based distance
+      centroid = "shape",      # shape averaging
+      seed = 42
+    )
+    # evaluate clustering - internal
+    evaluation <- intCriteria(
+      as.matrix(data),
+      k_dtw@cluster,
+      c("Silhouette",
+        "Calinski_Harabasz",
+        "Davies_Bouldin",
+        "Dunn")
+    )
+    for (j in 1:length(evaluation)) {k_dtw_evaluation[j, i] <- evaluation[j]}
+    k_dtw_cluster[, i - 1] <- k_dtw@cluster
+  }
+  k_shape <- list("cluster" = k_dtw_cluster, "evaluation" = k_dtw_evaluation)
+  return(k_shape)
+}
+```
+
+### c-means dtw
+
+```{r c_dtw, eval=T}
+c_means_dtw <- function(data, k_low, k_high) {
+  c_dtw_evaluation <-
+    as.data.frame(matrix(
+      data = NA,
+      ncol = 5,
+      nrow = 4
+    ))
+  colnames(c_dtw_evaluation) <- c("evaluation method", "k = 2", "k = 3", "k = 4", "k = 5")
+  c_dtw_evaluation[, 1] <- c("Silhouette",
+                             "Calinski_Harabasz",
+                             "Davies_Bouldin",
+                             "Dunn")
+  # cluster assignments
+  c_dtw_cluster <-
+    as.data.frame(matrix(
+      data = NA,
+      ncol = 4,
+      nrow = nrow(data)
+    ))
+  colnames(c_dtw_cluster) <- c("k = 2", "k = 3", "k = 4", "k = 5")
+  
+  for (i in 2:5) {
+    c_dtw <- tsclust(
+      data,
+      k = i,
+      type = "fuzzy",      # fuzzy clustering
+      preproc = zscore,      # z-normalisation
+      distance = "dtw",      # standard dynamic time warping
+      centroid = "fcmdd",      # fuzzy suitable for vectors of different length
+      seed = 42,
+      trace = TRUE,
+      control = fuzzy_control(fuzziness = 2,
+                              iter.max = 10L)
+    )
+    # evaluation of clustering - internal
+    evaluation <- intCriteria(
+      as.matrix(data),
+      c_dtw@cluster,
+      c("Silhouette",
+        "Calinski_Harabasz",
+        "Davies_Bouldin",
+        "Dunn")
+    )
+    for (j in 1:length(evaluation)) {c_dtw_evaluation[j, i] <- evaluation[j]}
+    c_dtw_cluster[, i - 1] <- c_dtw@cluster
+  }
+  c_means <- list("cluster" = c_dtw_cluster, "evaluation" = c_dtw_evaluation)
+  return(c_means)
+}
+```
+
+### dtw cluster
+
+```{r dtw_clustering, eval=T}
+dtw_cluster <- function(data, k_low, k_high) {
+  dtw_evaluation <-
+    as.data.frame(matrix(
+      data = NA,
+      ncol = 5,
+      nrow = 4
+    ))
+  colnames(dtw_evaluation) <- c("evaluation method", "k = 2", "k = 3", "k = 4", "k = 5")
+  dtw_evaluation[, 1] <- c("Silhouette",
+                           "Calinski_Harabasz",
+                           "Davies_Bouldin",
+                           "Dunn")
+  # cluster assignments
+  dtw_cluster <-
+    as.data.frame(matrix(
+      data = NA,
+      ncol = 4,
+      nrow = nrow(data)
+    ))
+  colnames(dtw_cluster) <- c("k = 2", "k = 3", "k = 4", "k = 5")
+  
+  for (i in 2:5) {
+    dtw <- tsclust(
+      data,
+      k = i,
+      type = "partitional",      # partition around centroids
+      preproc = zscore,      # z-normalisation
+      distance = "dtw",      # euclidean distance
+      centroid = "sdtw_cent",      # soft-DTW centroids
+      seed = 42,
+      trace = TRUE
+    )
+    # evaluate clustering - internal
+    evaluation <- intCriteria(
+      as.matrix(data),
+      dtw@cluster,
+      c("Silhouette",
+        "Calinski_Harabasz",
+        "Davies_Bouldin",
+        "Dunn")
+    )
+    for (j in 1:length(evaluation)) {dtw_evaluation[j, i] <- evaluation[j]}
+    dtw_cluster[, i - 1] <- dtw@cluster
+  }
+  dtw <- list("cluster" = dtw_cluster, "evaluation" = dtw_evaluation)
+  return(dtw)
+}
+```
+
+### BDEW comparison
+
+```{r BDEW_comparison}
+BDEW_comparison <- function(data) {
+  BDEW_evaluation <-
+    as.data.frame(matrix(
+      data = NA,
+      ncol = 7,
+      nrow = 4
+    ))
+  colnames(BDEW_evaluation) <-
+    c(
+      "evaluation method",
+      "k-means",
+      "k-mediod",
+      "c-means eucl",
+      "k-shape",
+      "c-means dtw",
+      "dtw"
+    )
+  BDEW_evaluation[, 1] <- c("Silhouette",
+                            "Calinski_Harabasz",
+                            "Davies_Bouldin",
+                            "Dunn")
+  # cluster assignments
+  cluster <-
+    as.data.frame(matrix(
+      data = NA,
+      ncol = 6,
+      nrow = nrow(data)
+    ))
+  colnames(cluster) <-
+    c("k-means",
+      "k-mediod",
+      "c-means eucl",
+      "k-shape",
+      "c-means dtw",
+      "dtw")
+  
+  # k-means
+  k_means <- tsclust(
+    data,
+    k = 9,
+    type = "partitional",
+    # partition around medoids
+    preproc = zscore,
+    # z-normalisation
+    distance = "L2",
+    # shape based distance
+    centroid = "mean",
+    # partition around mediods
+    seed = 42
+  )
+  evaluation <- intCriteria(
+    as.matrix(data),
+    k_means@cluster,
+    c("Silhouette",
+      "Calinski_Harabasz",
+      "Davies_Bouldin",
+      "Dunn")
+  )
+  for (j in 1:length(evaluation)) {
+    BDEW_evaluation[j, "k-means"] <- evaluation[j]
+  }
+  cluster[, "k-means"] <- k_means@cluster
+  
+  # k-mediod
+  k_mediod <- tsclust(
+    data,
+    k = 9,
+    type = "partitional",
+    # partition around medoids
+    preproc = zscore,
+    # z-normalisation
+    distance = "L2",
+    # euclidean distance
+    centroid = "pam",
+    # partition around mediods
+    seed = 42
+  )
+  evaluation <- intCriteria(
+    as.matrix(data),
+    k_mediod@cluster,
+    c("Silhouette",
+      "Calinski_Harabasz",
+      "Davies_Bouldin",
+      "Dunn")
+  )
+  for (j in 1:length(evaluation)) {
+    BDEW_evaluation[j, "k-mediod"] <- evaluation[j]
+  }
+  cluster[, "k-mediod"] <- k_mediod@cluster
+  
+  # c-means eucl
+  c_means <- tsclust(
+    data,
+    k = 9,
+    type = "fuzzy",
+    # fuzzy clustering
+    preproc = zscore,
+    # z-normalisation
+    distance = "L2",
+    # euclidean distance
+    centroid = "fcmdd",
+    # partition around fuzzy mediods
+    seed = 42
+  )
+  # evaluate clustering - internal
+  evaluation <- intCriteria(
+    as.matrix(data),
+    c_means@cluster,
+    c("Silhouette",
+      "Calinski_Harabasz",
+      "Davies_Bouldin",
+      "Dunn")
+  )
+  for (j in 1:length(evaluation)) {
+    BDEW_evaluation[j, "c-means eucl"] <- evaluation[j]
+  }
+  cluster[, "c-means eucl"] <- c_means@cluster
+  
+  # k-shape
+  k_dtw <- tsclust(
+    data,
+    k = 9,
+    type = "partitional",
+    # partition around medoids
+    preproc = zscore,
+    # z-normalisation
+    distance = "sbd",
+    # shape based distance
+    centroid = "shape",
+    # shape averaging
+    seed = 42
+  )
+  # evaluate clustering - internal
+  evaluation <- intCriteria(
+    as.matrix(data),
+    k_dtw@cluster,
+    c("Silhouette",
+      "Calinski_Harabasz",
+      "Davies_Bouldin",
+      "Dunn")
+  )
+  for (j in 1:length(evaluation)) {
+    BDEW_evaluation[j, "k-shape"] <- evaluation[j]
+  }
+  cluster[, "k-shape"] <- k_dtw@cluster
+  
+  # c-means dtw
+  c_dtw <- tsclust(
+    data,
+    k = 9,
+    type = "fuzzy",
+    # fuzzy clustering
+    preproc = zscore,
+    # z-normalisation
+    distance = "dtw",
+    # standard dynamic time warping
+    centroid = "fcmdd",
+    # fuzzy suitable for vectors of different length
+    seed = 42,
+    trace = TRUE,
+    control = fuzzy_control(fuzziness = 2,
+                            iter.max = 10L)
+  )
+  # evaluation of clustering - internal
+  evaluation <- intCriteria(
+    as.matrix(data),
+    c_dtw@cluster,
+    c("Silhouette",
+      "Calinski_Harabasz",
+      "Davies_Bouldin",
+      "Dunn")
+  )
+  for (j in 1:length(evaluation)) {
+    BDEW_evaluation[j, "c-means dtw"] <- evaluation[j]
+  }
+  cluster[, "c-means dtw"] <- c_dtw@cluster
+  
+  # dtw
+  dtw <- tsclust(
+    data,
+    k = 9,
+    type = "partitional",
+    # partition around centroids
+    preproc = zscore,
+    # z-normalisation
+    distance = "dtw",
+    # euclidean distance
+    centroid = "sdtw_cent",
+    # soft-DTW centroids
+    seed = 42,
+    trace = TRUE
+  )
+  # evaluate clustering - internal
+  evaluation <- intCriteria(
+    as.matrix(data),
+    dtw@cluster,
+    c("Silhouette",
+      "Calinski_Harabasz",
+      "Davies_Bouldin",
+      "Dunn")
+  )
+  for (j in 1:length(evaluation)) {
+    BDEW_evaluation[j, "dtw"] <- evaluation[j]
+  }
+  cluster[, "dtw"] <- dtw@cluster
+  
+  
+  BDEW_df <-
+    list("cluster" = cluster, "evaluation" = BDEW_evaluation)
+  return(BDEW_df)
+}
+```
+
+### centres
+
+```{r centres}
+centres_k_means <- function(data, opt_k) {
+  for (i in opt_k) {
+    k_means <- tsclust(
+      data,
+      k = i,
+      type = "partitional",     # partition around medoids
+      preproc = zscore,      # z-normalisation
+      distance = "L2",      # shape based distance
+      centroid = "mean",      # partition around mediods
+      seed = 42
+    )
+    centres <- matrix(data = NA,
+                      nrow = 96,
+                      ncol = i)
+    for (j in 1:i) {
+      centres[, j] <- k_means@centroids[[j]]
+    }
+  }
+  return(centres)
+}
+
+centres_c_means <- function(data, opt_k) {
+  for (i in opt_k) {
+    c_means <- tsclust(
+      data,
+      k = i,
+      type = "fuzzy",      # fuzzy clustering
+      preproc = zscore,      # z-normalisation
+      distance = "L2",      # euclidean distance
+      centroid = "fcmdd",      # partition around fuzzy mediods
+      seed = 42
+    )
+    centres <- matrix(data = NA,
+                      nrow = 96,
+                      ncol = i)
+    for (j in 1:i) {
+      centres[, j] <- c_means@centroids[[j]]
+    }
+  }
+  return(centres)
+}
+```
+
+
+# whole data set
+
+### clustering
+
+```{r whole_data, eval=FALSE}
+k_means_whole <- k_means_euclidean(data_standardised, 2, 9)
+
+c_means_whole <- c_means_euclidean(data_standardised, 2, 9)
+
+k_mediod_whole <- k_mediod_euclidean(data_standardised, 2, 9)
+
+# DO NOT RUN - takes ~6 hours from here on
+c_means_dtw_whole <- c_means_dtw(data_standardised, 2, 9)
+
+k_shape_whole <- k_shape(data_standardised, 2, 9)
+
+dtw_whole <- dtw_cluster(data_standardised, 2, 9)
+
+BDEW_whole <- BDEW_comparison(data_standardised)
+```
+
+### cluster assignment
+
+to add the cluster information to the data, it is stored in a separate data frame to be called on later on again.
+
+```{r cluster_assignment_whole, eval=FALSE}
+# store relevant values in data frame
+cluster_df <- as.data.frame(matrix(data = NA, ncol = 6, nrow = nrow(data_standardised)))
+colnames(cluster_df) <- c("k-means", "k-mediod", "c-means", "c-means-dtw", "k-shape", "dtw")
+
+cluster_df$`k-means` <- k_means_whole$cluster$`k = 2`
+cluster_df$`k-mediod` <- k_mediod_whole$cluster$`k = 2`
+cluster_df$`c-means` <- c_means_whole$cluster$`k = 2`
+cluster_df$`c-means-dtw` <-c_means_dtw_whole$cluster$`k = 2`
+cluster_df$`k-shape` <- k_shape_whole$cluster$`k = 2`
+cluster_df$dtw <- dtw_whole$cluster$`k = 2`
+
+write_csv(
+  cluster_df,
+  "./data/cluster_whole.csv"
+)
+
+write_csv(
+  as.data.frame(centres_k_means(data_standardised, 2)),
+  "./data/centre_whole.csv"
+)
+```
+
+
+# MGH data set
+
+### clustering
+
+```{r MGH}
+k_means_MGH <- k_means_euclidean(MGH_wide, 2, 9)
+
+c_means_MGH <- c_means_euclidean(MGH_wide, 2, 9)
+
+k_mediod_MGH <- k_mediod_euclidean(MGH_wide, 2, 9)
+
+# DO NOT RUN - takes ~6 hours from here on
+c_means_dtw_MGH <- c_means_dtw(MGH_wide, 2, 9)
+
+k_shape_MGH <- k_shape(MGH_wide, 2, 9)
+
+dtw_MGH <- dtw_cluster(MGH_wide, 2, 9)
+```
+
+### cluster assignment
+
+to add the cluster information to the data, it is stored in a separate data frame to be called on later on again.
+
+```{r cluster_assignment_MGH, eval=FALSE}
+# store relevant values in data frame
+cluster_df <- as.data.frame(matrix(data = NA, ncol = 6, nrow = nrow(MGH_wide)))
+colnames(cluster_df) <- c("k-means", "k-mediod", "c-means", "c-means-dtw", "k-shape", "dtw")
+
+cluster_df$`k-means` <- k_means_MGH$cluster$`k = 4`
+cluster_df$`k-mediod` <- k_mediod_MGH$cluster$`k = 3`
+cluster_df$`c-means` <- c_means_MGH$cluster$`k = 2`
+cluster_df$`c-means-dtw` <- c_means_dtw_MGH$cluster$`k = 2`
+cluster_df$`k-shape` <- k_shape_MGH$cluster$`k = 5`
+cluster_df$dtw <- dtw_MGH$cluster$`k = 3`
+
+write_csv(
+  cluster_df,
+  "./data/cluster_MGH.csv"
+)
+
+write_csv(
+  as.data.frame(centres_k_means(MGH_wide, 4)),
+  "./data/centre_MGH.csv"
+)
+```
+
+
+# FZI data set
+
+### clustering
+
+```{r FZI}
+k_means_FZI <- k_means_euclidean(FZI_wide, 2, 9)
+
+c_means_FZI <- c_means_euclidean(FZI_wide, 2, 9)
+
+k_mediod_FZI <- k_mediod_euclidean(FZI_wide, 2, 9)
+
+# DO NOT RUN - takes ~6 hours from here on
+c_means_dtw_FZI <- c_means_dtw(FZI_wide, 2, 9)
+
+k_shape_FZI <- k_shape(FZI_wide, 2, 9)
+
+dtw_FZI <- dtw_cluster(FZI_wide, 2, 9)
+```
+
+### cluster assignment
+
+to add the cluster information to the data, it is stored in a separate data frame to be called on later on again.
+
+```{r cluster_assignment_FZI, eval=FALSE}
+# store relevant values in data frame
+cluster_df <- as.data.frame(matrix(data = NA, ncol = 6, nrow = nrow(FZI_wide)))
+colnames(cluster_df) <- c("k-means", "k-mediod", "c-means", "c-means-dtw", "k-shape", "dtw")
+
+cluster_df$`k-means` <- k_means_FZI$cluster$`k = 2`
+cluster_df$`k-mediod` <- k_mediod_FZI$cluster$`k = 2`
+cluster_df$`c-means` <- c_means_FZI$cluster$`k = 2`
+cluster_df$`c-means-dtw` <- c_means_dtw_FZI$cluster$`k = 3`
+cluster_df$`k-shape` <- k_shape_FZI$cluster$`k = 4`
+cluster_df$dtw <- dtw_FZI$cluster$`k = 2`
+
+write_csv(
+  cluster_df,
+  "./data/cluster_FZI.csv"
+)
+
+write_csv(
+  as.data.frame(centres_k_means(FZI_wide, 2)),
+  "./data/centre_FZI.csv"
+)
+```
+
+# Hoepfner data set
+
+### clustering
+
+```{r Hoepfner}
+k_means_Hoepfner <- k_means_euclidean(Hoepfner_wide, 2, 9)
+
+c_means_Hoepfner <- c_means_euclidean(Hoepfner_wide, 2, 9)
+
+k_mediod_Hoepfner <- k_mediod_euclidean(Hoepfner_wide, 2, 9)
+
+# DO NOT RUN - takes ~6 hours from here on
+c_means_dtw_Hoepfner <- c_means_dtw(Hoepfner_wide, 2, 9)
+
+k_shape_Hoepfner <- k_shape(Hoepfner_wide, 2, 9)
+
+dtw_Hoepfner <- dtw_cluster(Hoepfner_wide, 2, 9)
+```
+
+### cluster assignment
+
+to add the cluster information to the data, it is stored in a separate data frame to be called on later on again.
+
+```{r cluster_assignment_Hoepfner, eval=FALSE}
+# store relevant values in data frame
+cluster_df <- as.data.frame(matrix(data = NA, ncol = 6, nrow = nrow(Hoepfner_wide)))
+colnames(cluster_df) <- c("k-means", "k-mediod", "c-means", "c-means-dtw", "k-shape", "dtw")
+
+cluster_df$`k-means` <- k_means_Hoepfner$cluster$`k = 2`
+cluster_df$`k-mediod` <- k_mediod_Hoepfner$cluster$`k = 2`
+cluster_df$`c-means` <- c_means_Hoepfner$cluster$`k = 3`
+cluster_df$`c-means-dtw` <-c_means_dtw_Hoepfner$cluster$`k = 4`
+cluster_df$`k-shape` <- k_shape_Hoepfner$cluster$`k = 3`
+cluster_df$dtw <- dtw_Hoepfner$cluster$`k = 2`
+
+write_csv(
+  cluster_df,
+  "./data/cluster_Hoepfner.csv"
+)
+
+write_csv(
+  as.data.frame(centres_k_means(Hoepfner_wide, 2)),
+  "./data/centre_Hoepfner.csv"
+)
+```
+
+# TeFak data set
+
+### clustering
+
+```{r TeFak}
+k_means_TeFak <- k_means_euclidean(TeFak_wide, 2, 9)
+
+c_means_TeFak <- c_means_euclidean(TeFak_wide, 2, 9)
+
+k_mediod_TeFak <- k_mediod_euclidean(TeFak_wide, 2, 9)
+
+# DO NOT RUN - takes ~6 hours from here on
+c_means_dtw_TeFak <- c_means_dtw(TeFak_wide, 2, 9)
+
+k_shape_TeFak <- k_shape(TeFak_wide, 2, 9)
+
+dtw_TeFak <- dtw_cluster(TeFak_wide, 2, 9)
+```
+
+### cluster assignment
+
+to add the cluster information to the data, it is stored in a separate data frame to be called on later on again.
+
+```{r cluster_assignment_TeFak, eval=FALSE}
+# store relevant values in data frame
+cluster_df <- as.data.frame(matrix(data = NA, ncol = 6, nrow = nrow(TeFak_wide)))
+colnames(cluster_df) <- c("k-means", "k-mediod", "c-means", "c-means-dtw", "k-shape", "dtw")
+
+cluster_df$`k-means` <- k_means_TeFak$cluster$`k = 2`
+cluster_df$`k-mediod` <- k_mediod_TeFak$cluster$`k = 2`
+cluster_df$`c-means` <- c_means_TeFak$cluster$`k = 2`
+cluster_df$`c-means-dtw` <- c_means_dtw_TeFak$cluster$`k = 3`
+cluster_df$`k-shape` <- k_shape_TeFak$cluster$`k = 2`
+cluster_df$dtw <- dtw_TeFak$cluster$`k = 2`
+
+write_csv(
+  cluster_df,
+  "./data/cluster_TeFak.csv"
+)
+
+write_csv(
+  as.data.frame(centres_c_means(TeFak_wide, 2)),
+  "./data/centre_TeFak.csv"
+)
+```
+
+# BDEW comparison
+
+```{r BDEW_all}
+#BDEW_whole <- BDEW_comparison(data_standardised)
+
+BDEW_MGH <- BDEW_comparison(MGH_wide)
+
+BDEW_FZI <- BDEW_comparison(FZI_wide)
+
+BDEW_Hoepfner <- BDEW_comparison(Hoepfner_wide)
+
+BDEW_TeFak <- BDEW_comparison(TeFak_wide)
+```
+
+### cluster assignment
+
+to add the cluster information to the data, it is stored in a separate data frame to be called on later on again.
+
+```{r cluster_assignment_BDEW, eval=FALSE}
+# store relevant values in data frame
+cluster_df <- vector(mode = "list", length = 4)
+names(cluster_df) <- c("FZI", "Hoepfner", "MGH", "TeFak")
+
+cluster_df$FZI <- BDEW_FZI$cluster$`k-means`
+cluster_df$Hoepfner <- BDEW_Hoepfner$cluster$`k-means`
+cluster_df$MGH <- BDEW_MGH$cluster$`k-means`
+cluster_df$TeFak <- BDEW_TeFak$cluster$`k-shape`
+
+capture.output(
+  cluster_df,
+  file = "./data/cluster_BDEW.csv"
+)
+```
+
+# test
+
+```{r test, eval=FALSE}
+k_means_center <- as.data.frame(k_means@centroids, col.names = colnames(k_means_cluster))
+# comparison - external
+  # k = 2
+extCriteria(
+  k_dtw_cluster[,1],
+  k_mediod_cluster[,1],
+  c("Rand",
+    "Russel_Rao")
+)
+
+
+
+
+
+
+```
+

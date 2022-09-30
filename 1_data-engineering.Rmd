@@ -1,0 +1,681 @@
+---
+title: "data-enginering"
+author: "Jan Besler"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# libraries
+
+```{r setup, echo=FALSE}
+# load libraries
+library(knitr)      # use .Rmd files
+
+  # reading data
+library(readr)      # reading csv
+library(data.table) # fast data manipulation
+library(readxl)
+
+  # manipulate data
+library(tidyr)      # manipulating data
+library(dplyr)      # manipulating data
+library(rlist)      # working with lists
+library(stringr)    # work with strings
+library(tibble)     # create data frames
+library(stringi)    # process charactar strings
+library(lubridate)  # transform character into dates
+library(epitools)   # time manipulation
+library(lubridate)  # time manipulation (quarters)
+library(diffdf)     # compare df
+library(useful)     # shift columns
+library(anytime)    # convert to time easily
+
+  # statistics
+library(Matrix)     # required for lme4
+
+  # visuals
+library(ggplot2)    # make graphs
+library(ggExtra)    # additional functionality for ggplot2
+library(ggpubr)     # combine multiple graphs into one
+library(gridExtra)  # table management
+```
+
+# load raw data
+
+explanations for the acronyms & adress
+
+  - HuN = Haid-und-Neu-Straße
+  - HuN 32 = Mehrgenerationen Haus
+  - HuN 18 = Hoepfner Areal
+  - HuN 5a = FZI
+  - HuN 14 = FZI
+  - HuN 7  = TechnologieFarbik
+  
+  
+
+>**UTC time and german time have not always a lag of 1 hour.** This comes down to the use of summer and winter time. Both time stamps are carried through to look for differences later in the graphs.
+
+### MGH
+
+The MGH data has to be shifted by 15 minutes, because the measured points occur at the end of the 15 minute mark. 
+
+```{r data MGH}
+# define col names to avoid UTF-8 errors
+col_names <- c("Tag_deutsch",
+             "Tag_UTC",
+             "Bezug_kumuliert_Wh",
+             "Einspeisung_kumuliert_Wh",
+             "Bezug_W",
+             "Einspeisung_W")
+
+# load data for MGH
+  # december 2019
+raw_MGH_19 <- fread(
+  "./data/Lastgaenge/Rohdaten/HuN 32 - 08135284 - Ъbergabe - ZДhler 2019_Dez.csv",
+  col.names = col_names
+)
+  
+raw_MGH_20 <- fread(
+  "./data/Lastgaenge/Rohdaten/HuN 32 - 08135284 - Ъbergabe - ZДhler 2020.csv"
+)
+head(raw_MGH_20, n = 1)[[1]]
+tail(raw_MGH_20, n = 1)[[1]]
+
+  # whole 2021 data
+raw_MGH_21 <- fread(
+  "./data/Lastgaenge/Rohdaten/HuN 32 - 08135284 - Ъbergabe - ZДhler 2021.csv",
+  col.names = col_names
+)
+head(raw_MGH_21, n = 1)[[1]]
+tail(raw_MGH_21, n = 1)[[1]]
+
+  # january - march 21st data 2021
+raw_MGH_22 <- fread(
+  "./data/Lastgaenge/Rohdaten/HuN 32 - 08135284 - Ъbergabe - ZДhler 2022_Jan-Mrz.csv",
+  col.names = col_names
+)
+head(raw_MGH_22, n = 1)[[1]]
+tail(raw_MGH_22, n = 1)[[1]]
+
+  # add UTC time
+    # first change last measures from prvious year
+Tag_2020 <- str_replace_all(raw_MGH_21$Tag_UTC, "2020", "2019")
+    # then change all the rest of the data
+Tag_2020 <- str_replace_all(Tag_2020, "2021", "2020")
+    # get 29th february
+feb_29th <- raw_MGH_20[grep("29.02.", raw_MGH_20$Zeit)]$Zeit
+
+    # insert 29th into vector
+Tag_2020 <- append(
+  Tag_2020,
+  feb_29th,
+  after = which(Tag_2020 == '28.02.2020 23:45'))
+
+    # delete 31st december to cut to length of 35040
+Tag_2020 <- Tag_2020[1:35040]
+    # add to data frame
+raw_MGH_20$Tag_UTC <- Tag_2020
+  # change col order and colnames
+raw_MGH_20 <- raw_MGH_20 %>% relocate(
+  Tag_UTC, .after = Zeit)
+  colnames(raw_MGH_20) <- col_names
+
+# merge data - since the data connects perfectly, they only have to be appended
+raw_clean_MGH <- rbindlist(list(raw_MGH_19, raw_MGH_20, raw_MGH_21, raw_MGH_22),
+                           use.names = TRUE  # bind by colnames
+                           )
+```
+
+Since the base data is merged now, the manipulation process is started.
+
+```{r MGH_manipulation}
+# move time 15 one lag to start on 13:45
+  # german time
+raw_clean_MGH$Tag_deutsch[2:nrow(raw_clean_MGH)] <- raw_clean_MGH$Tag_deutsch[1:(nrow(raw_clean_MGH) - 1)]
+  # UTC time
+raw_clean_MGH$Tag_UTC[2:nrow(raw_clean_MGH)] <- raw_clean_MGH$Tag_UTC[1:(nrow(raw_clean_MGH) - 1)]
+  # change first values
+raw_clean_MGH[1,1:2] <- list("02.12.2019 14:45", "02.12.2019 13:45")
+
+# counting unique values in table
+aggregate(data.frame(count = raw_clean_MGH$Einspeisung_W),
+          list(value = raw_clean_MGH$Einspeisung_W),
+          length)
+  # here it can be seen that most of the values are 0, but ~ 8000 values > 0.
+
+# change column types from character to date
+  # change to date
+raw_clean_MGH$Tag_deutsch <- dmy_hm(raw_clean_MGH$Tag_deutsch, tz = grep("Berlin", OlsonNames(), value = TRUE))
+raw_clean_MGH$Tag_UTC <- dmy_hm(raw_clean_MGH$Tag_UTC, tz = "UTC")
+
+# write csv file
+write_csv(
+  x = raw_clean_MGH,
+  file = "./data/MGH_raw.csv",
+  append = FALSE,
+  col_names = TRUE
+  )
+
+# check for differences between Johannes and this file.
+  # load the data
+predone_data <- fread(
+  "./data/Lastgaenge/Lastgang MGH 2019-2022 UTC Broken.csv",
+  col.names = c("Tag_UTC", "Bezug_W")
+)
+  # subset data to compare
+raw_compare <- raw_clean_MGH[, c("Tag_UTC", "Bezug_W")]
+  # check for differences and similarities
+diffdf(raw_compare, predone_data, suppress_warnings = TRUE)
+
+# 31st december 2020, missing in data
+
+# collect garbage
+rm(
+  predone_data,
+  raw_compare
+  )
+gc()
+```
+
+### Hoepfner
+
+For the Hoepfner data the 29th february 2020 is included, though the 31st december 2020 is missing here too.
+
+Data again lists the values for the end of the 15-minutes time frame.
+
+```{r data Hoepfner}
+# load data for Hoepfner - seperated into 2 locations & files
+
+  # whole 2020 data
+raw_Hoepfner_20 <- fread(
+  "./data/Lastgaenge/Rohdaten/BES - HuN Str. 18 - 08579175 - ZДhler 08579175_2020.csv",
+  col.names = col_names
+)
+head(raw_Hoepfner_20, n = 1)[[1]]
+tail(raw_Hoepfner_20, n = 1)[[1]]
+
+  # whole 2021 data
+raw_Hoepfner_21 <- fread(
+  "./data/Lastgaenge/Rohdaten/BES - HuN Str. 18 - 08579175 - ZДhler 08579175_2021.csv",
+  skip = 2,  # comment in first line
+  col.names = col_names
+)
+head(raw_Hoepfner_21, n = 1)[[1]]
+tail(raw_Hoepfner_21, n = 1)[[1]]
+
+  # whole 2022 data
+raw_Hoepfner_22 <- fread(
+  "./data/Lastgaenge/Rohdaten/BES - HuN Str. 18 - 08579175 - ZДhler 08579175_2022.csv",
+  col.names = col_names
+)
+head(raw_Hoepfner_22, n = 1)[[1]]
+tail(raw_Hoepfner_22, n = 1)[[1]]
+
+# analyse data
+  # difference in two data sets
+nrow(raw_Hoepfner_20) - nrow(raw_Hoepfner_21)
+  # one day is missing!
+# find missing day
+days_2020 <- substr(raw_Hoepfner_20$Tag_UTC, start = 1, stop = 6)
+days_2021 <- substr(raw_Hoepfner_21$Tag_UTC, start = 1, stop = 6)
+setdiff(days_2020, days_2021)
+
+# only difference is 29th February, hence 31st December is also missing again
+
+# merge data
+raw_clean_Hoepfner <- rbindlist(list(
+  raw_Hoepfner_20,
+  raw_Hoepfner_21,
+  raw_Hoepfner_22),
+  use.names = TRUE)
+
+# move time 15 one lag to start on 13:45
+# german time
+raw_clean_Hoepfner$Tag_deutsch[2:nrow(raw_clean_Hoepfner)] <-
+  raw_clean_Hoepfner$Tag_deutsch[1:(nrow(raw_clean_Hoepfner) - 1)]
+# UTC time
+raw_clean_Hoepfner$Tag_UTC[2:nrow(raw_clean_Hoepfner)] <-
+  raw_clean_Hoepfner$Tag_UTC[1:(nrow(raw_clean_Hoepfner) - 1)]
+# change first values
+raw_clean_Hoepfner[1, 1:2] <-
+  list("01.01.2020 00:00", "31.12.2019 23:00")
+
+# change column types from character to date
+  # change to date
+raw_clean_Hoepfner$Tag_deutsch <- dmy_hm(raw_clean_Hoepfner$Tag_deutsch, tz = grep("Berlin", OlsonNames(), value = TRUE))
+raw_clean_Hoepfner$Tag_UTC <- dmy_hm(raw_clean_Hoepfner$Tag_UTC, tz = "UTC")
+
+# set impossible data to NaN
+raw_clean_Hoepfner[raw_clean_Hoepfner$Bezug_W == 0,]
+count(raw_clean_Hoepfner[raw_clean_Hoepfner$Bezug_W == 0,])
+
+
+# write csv file
+write_csv(
+  x = raw_clean_Hoepfner,
+  file = "./data/Hoepfner_raw.csv",
+  append = FALSE,
+  col_names = TRUE
+  )
+
+
+# # compare with Johannes solution
+# predone_data <- rbindlist(list(
+#   fread("./data/Lastgaenge/Lastgang Hoepfner 2020 UTC Broken.csv",
+#   col.names = c("Tag_UTC", "Bezug_W")),
+#   fread("./data/Lastgaenge/Lastgang Hoepfner 2021 UTC Full.csv",
+#   col.names = c("Tag_UTC", "Bezug_W")),
+#   fread("./data/Lastgaenge/Lastgang Hoepfner 2022 UTC Broken.csv",
+#   col.names = c("Tag_UTC", "Bezug_W"))
+# ))
+# missing_Hoepfner <- setdiff(
+#   substr(predone_data$Tag_UTC, start = 1, stop = 10),
+#   substr(raw_clean_Hoepfner$Tag_UTC, start = 1, stop = 10)
+# )
+# length(missing_Hoepfner)
+# missing_Hoepfner
+
+# collect garbage
+rm(
+  missing_Hoepfner,
+  predone_data,
+  days_2020,
+  days_2021
+)
+```
+All of 31st Decembers is missing in pre-processed data. Plus 69 data points from 13.07.2020 show no energy usage.
+
+### FZI
+
+##### HuN 5a
+
+```{r data FZI}
+# load data for FZI - seperated into 2 locations & files
+
+# first part for HuN 5a
+  # whole 2019 data
+raw_FZI_19_1 <- read_excel(
+  "./data/Lastgaenge/Rohdaten/2019_Lastgang_FZI_Anlage 1712_Marktlokation 50784599465_Haid-und_Neu-Str. 5a.xlsx",
+  skip = 1
+)
+raw_FZI_19_1$...4 = NULL  # deletes comments in fourth column
+head(raw_FZI_19_1, n = 1)[[1]]
+tail(raw_FZI_19_1, n = 1)[[1]]
+
+  # whole 2020 data
+raw_FZI_20_1 <- read_excel(
+  "./data/Lastgaenge/Rohdaten/2020_Lastgang_FZI_Anlage 1712_Marktlokation 50784599465_Haid-und_neu-Str. 5a.xlsx",
+  skip = 1
+)
+head(raw_FZI_20_1, n = 1)[[1]]
+tail(raw_FZI_20_1, n = 1)[[1]]
+
+  # whole 2021 data
+raw_FZI_21_1 <- read_excel(
+  "./data/Lastgaenge/Rohdaten/2021_Lastgang_FZI_Anlage 1712_Marktlokation 50784599465_Haid-und_neu-Str. 5a.xlsx",
+  skip = 1
+)
+head(raw_FZI_21_1, n = 1)[[1]]
+tail(raw_FZI_21_1, n = 1)[[1]]
+
+# merge files
+raw_FZI_1 <- rbindlist(list(
+   raw_FZI_19_1,
+   raw_FZI_20_1,
+   raw_FZI_21_1),
+   use.names = TRUE)
+setnames(raw_FZI_1, c('Ab-Datum', 'Ab-Zeit', 'Profilwert kW'), c('Datum', 'Zeit', 'Bezug_W'))
+
+# change column from kW to W
+raw_FZI_1$Bezug_W <- raw_FZI_1$Bezug_W * 1000
+
+# change time format
+raw_FZI_1$Zeit <- substr(raw_FZI_1$Zeit, start = 12, stop = 16)
+raw_FZI_1$Datum <- strftime(raw_FZI_1$Datum, format = "%d.%m.%Y")
+raw_FZI_1$Zeit_deutsch <- paste(raw_FZI_1$Datum, raw_FZI_1$Zeit, sep = " ")
+```
+
+##### HuN 14
+
+repeat for 2nd half of data
+
+not included anymore since there is no legal ground to use this data!
+
+```{r FZI_2, eval=FALSE}
+# second part HuN 14
+  # 2019 data
+raw_FZI_19_2 <- read_excel(
+  "./data/Lastgaenge/Rohdaten/2019_Lastgang_FZI_Anlage 1719_Marktlokation 50782704165_Haid-und_neu-Str. 14.xlsx",
+  skip = 1
+)
+head(raw_FZI_19_2, n = 1)[[1]]
+tail(raw_FZI_19_2, n = 1)[[1]]
+
+  # 2020 data
+raw_FZI_20_2 <- read_excel(
+  "./data/Lastgaenge/Rohdaten/2020_Lastgang_FZI_Anlage 1719_Marktlokation 50782704165_Haid-und_neu-Str. 14.xlsx",
+  skip = 1
+)
+head(raw_FZI_20_2, n = 1)[[1]]
+tail(raw_FZI_20_2, n = 1)[[1]]
+
+  # 2021 data
+raw_FZI_21_2 <- read_excel(
+  "./data/Lastgaenge/Rohdaten/2020_Lastgang_FZI_Anlage 1719_Marktlokation 50782704165_Haid-und_neu-Str. 14.xlsx",
+  skip = 1
+)
+head(raw_FZI_21_2, n = 1)[[1]]
+tail(raw_FZI_21_2, n = 1)[[1]]
+
+# merge files
+raw_FZI_2 <- rbindlist(list(
+   raw_FZI_19_2,
+   raw_FZI_20_2,
+   raw_FZI_21_2),
+   use.names = TRUE)
+setnames(raw_FZI_2, c('Ab-Datum', 'Ab-Zeit', 'Profilwert kW'), c('Datum', 'Zeit', 'Bezug_kW'))
+
+# change time format
+raw_FZI_2$Zeit <- substr(raw_FZI_2$Zeit, start = 12, stop = 16)
+raw_FZI_2$Datum <- strftime(raw_FZI_2$Datum, format = "%d.%m.%Y")
+raw_FZI_2$Zeit_deutsch <- paste(raw_FZI_2$Datum, raw_FZI_2$Zeit, sep = " ")
+```
+
+##### merge & manipulation
+
+now combine both files and start manipulating the data.
+
+```{r FZI combined, eval=FALSE}
+# analyse differences
+missing_FZI <- setdiff(
+  raw_FZI_2$Datum,
+  raw_FZI_1$Datum
+)
+length(missing_FZI)
+missing_FZI
+
+# first three months of 2019 are missing for first part
+
+# merge two data sets
+raw_clean_FZI <- full_join(
+  raw_FZI_1,
+  raw_FZI_2,
+  by = c("Datum", "Zeit", "Zeit_deutsch")
+)
+setnames(raw_clean_FZI, c('Bezug_kW.x', 'Bezug_kW.y'), c('HuN_5a', 'HuN_14'))
+
+# relocate german time column
+raw_clean_FZI <- raw_clean_FZI %>% relocate(
+  Zeit_deutsch, .after = Zeit)
+
+# move time 15 one lag to start on 13:45
+# german time
+raw_clean_Hoepfner$Tag_deutsch[2:nrow(raw_clean_Hoepfner)] <-
+  raw_clean_Hoepfner$Tag_deutsch[1:(nrow(raw_clean_Hoepfner) - 1)]
+# UTC time
+raw_clean_Hoepfner$Tag_UTC[2:nrow(raw_clean_Hoepfner)] <-
+  raw_clean_Hoepfner$Tag_UTC[1:(nrow(raw_clean_Hoepfner) - 1)]
+# change first values
+raw_clean_Hoepfner[1, 1:2] <-
+  list("01.01.2020 00:00", "31.12.2019 23:00")
+
+# missing values in columns
+sum(is.na(raw_clean_FZI$HuN_5a))
+sum(is.na(raw_clean_FZI$HuN_14))
+  # print row of single missing value
+raw_clean_FZI[(which(is.na(raw_clean_FZI$HuN_14))-2):(which(is.na(raw_clean_FZI$HuN_14))+2),]
+
+# output shows shift in profiling of 15 minutes
+  # normalising on second row and startign values of 15 minutes
+raw_clean_FZI <- raw_clean_FZI %>% mutate_at(c("HuN_5a"),
+                         lead,
+                         n = 1)
+
+# drop row with missing value
+raw_clean_FZI <- drop_na(raw_clean_FZI,HuN_14)
+
+# build sum where both data sets are complete
+raw_clean_FZI$Summe_Verbrauch <- rowSums(
+  raw_clean_FZI[, 4:5],  # add 3rd & 4th column
+  na.rm = FALSE
+)
+
+# subset data with both entries
+raw_clean_FZI_small <- subset(raw_clean_FZI, !is.na(raw_clean_FZI$Summe_Verbrauch))
+  # delete dulicated entries
+raw_clean_FZI_small <- raw_clean_FZI_small[!duplicated(raw_clean_FZI_small),]
+
+
+# change column types from character to date
+  # change to date
+raw_clean_FZI_small$Zeit_deutsch <- dmy_hm(raw_clean_FZI_small$Zeit_deutsch, tz = grep("Berlin", OlsonNames(), value = TRUE))
+
+# write csv file
+write_csv(
+  x = raw_clean_FZI_small,
+  file = "./data/FZI_raw.csv",
+  append = FALSE,
+  col_names = TRUE
+  )
+
+# collect garbage
+rm(
+  raw_FZI_1,
+  raw_FZI_2,
+  missing_FZI
+)
+gc()
+```
+
+only continue working with FZI_1 data!
+
+```{r FZI_manipulation}
+# move time 15 one lag to start on 13:45
+# german time
+raw_FZI_1$Zeit_deutsch[2:nrow(raw_FZI_1)] <-
+  raw_FZI_1$Zeit_deutsch[1:(nrow(raw_FZI_1) - 1)]
+# change first values
+raw_FZI_1$Zeit_deutsch[[1]] <-
+  "01.04.2019 00:00"
+
+# missing values in columns
+sum(is.na(raw_FZI_1$Bezug_kW))
+
+# change column types from character to date
+  # change to date
+raw_FZI_1$Zeit_deutsch <- dmy_hm(raw_FZI_1$Zeit_deutsch, tz = grep("Berlin", OlsonNames(), value = TRUE))
+
+# write csv file
+write_csv(
+  x = raw_FZI_1,
+  file = "./data/FZI_raw.csv",
+  append = FALSE,
+  col_names = TRUE
+  )
+
+# collect garbage
+# rm(
+#   raw_FZI_19_1,
+#   raw_FZI_20_1,
+#   raw_FZI_21_1
+# )
+# gc()
+```
+
+
+### TeFak
+
+```{r TeFak}
+# monthly based reading
+TeFak_cols = c("Datum", "von", "Leistung in kW")
+TeFak_csv <- c("01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11")
+raw_TeFak <- as.data.frame(matrix(data = NA,
+                                  ncol = 2,
+                                  nrow = 1))
+colnames(raw_TeFak) <- c("Datum", "Leistung in W")
+for(i in TeFak_csv) {
+  raw <- fread(
+      paste0("~/Uni/KIT - Advanced Topics/data/Lastgaenge/Rohdaten/Technologiefabrik/2020.", i, "_368510_Technologiefabrik Karlsruhe GmbH_1.csv"),
+      skip = 9,
+      select = TeFak_cols
+    )
+  raw$Datum <- paste(raw$Datum, raw$von, sep = " ")
+  raw$`Leistung in W` <-
+    as.numeric(str_sub(raw$`Leistung in kW`, 1, nchar(raw$`Leistung in kW`) - 4)) * 1000
+  raw[, 2:3] <- NULL
+  raw_TeFak <- rbind(raw_TeFak, raw)
+}
+raw_TeFak <- raw_TeFak[-1,]
+raw_TeFak$Datum <- dmy_hm(raw_TeFak$Datum, tz = grep("Berlin", OlsonNames(), value = TRUE))
+# load december
+raw_TeFak_12 <- readxl::read_xlsx("~/Uni/KIT - Advanced Topics/data/Lastgaenge/Rohdaten/Technologiefabrik/Lastgang Dezember 2020 - VK 220001937.xlsx",
+                                  skip = 2)
+raw_TeFak_12$Datum <- paste(raw_TeFak_12$`Ab-Datum`,
+                            str_sub(raw_TeFak_12$`Ab-Zeit`, -8, -1),
+                            sep = " ")
+raw_TeFak_12$`Leistung in W` <- raw_TeFak_12$kW * 1000
+raw_TeFak_12[, 1:3] <- NULL
+
+raw_TeFak <- rbind(raw_TeFak, raw_TeFak_12)
+
+```
+
+
+# combine to data
+
+```{r data_export}
+data <- full_join(
+  full_join(
+    full_join(
+      select(raw_clean_Hoepfner, Tag_deutsch, Bezug_W)[2:nrow(raw_clean_Hoepfner), ],
+      select(raw_clean_MGH, Tag_deutsch, Bezug_W),
+      by = "Tag_deutsch"
+    ),
+    select(raw_FZI_1, Zeit_deutsch, Bezug_W),
+    by = c("Tag_deutsch" = "Zeit_deutsch")
+  ),
+  raw_TeFak,
+  by = c("Tag_deutsch" = "Datum")
+)
+class(data$Tag_deutsch)
+# order by date
+data <- arrange(data, Tag_deutsch)
+
+# rename columns
+colnames(data) <- c("Zeit_deutsch", "Hoepfner", "MGH", "FZI", "TeFak")
+
+# save data frame
+write_csv(
+  data,
+  file = "./data/data_clean.csv"
+)
+```
+
+# Gantt Diagram
+
+make a graph to show which time frame the single files cover.
+
+```{r gantt, eval=FALSE}
+# table for gantt chart
+gantt_df <- data.frame(matrix(NA,
+                               nrow = 13,  # as many rows as individual files
+                               ncol = 3))  # 3 columns for building, start and end
+gantt_df <- dplyr::rename(
+    gantt_df,
+    'data_input' = X1,
+    'start' = X2,
+    'end' = X3
+  )
+# name the tasks
+raw_names_vec <- c(
+  "raw_MGH_19",
+  "raw_MGH_20",
+  "raw_MGH_21",
+  "raw_MGH_22",
+  "raw_Hoepfner_20",
+  "raw_Hoepfner_21",
+  "raw_Hoepfner_22",
+  "raw_FZI_19_1",
+  "raw_FZI_20_1",
+  "raw_FZI_21_1",
+  "raw_FZI_19_2",
+  "raw_FZI_20_2",
+  "raw_FZI_21_2"
+)
+gantt_df[,1] <- raw_names_vec
+
+raw_data_vec <- c(
+  raw_MGH_19[,1],
+  raw_MGH_20[,1],
+  raw_MGH_21[,1],
+  raw_MGH_22[,1],
+  raw_Hoepfner_20[,1],
+  raw_Hoepfner_21[,1],
+  raw_Hoepfner_22[,1],
+  raw_FZI_19_1[,1],
+  raw_FZI_20_1[,1],
+  raw_FZI_21_1[,1]
+  # raw_FZI_19_2[,1],
+  # raw_FZI_20_2[,1],
+  # raw_FZI_21_2[,1]
+)
+
+for (j in 1:7) {
+  gantt_df[j, 2] <-
+    substr(raw_data_vec[[j]][1], start = 1, stop = 10)  # start
+  gantt_df[j, 3] <-
+    substr(raw_data_vec[[j]][lengths(raw_data_vec)[j]], start = 1, stop = 10)  # end
+}
+# for posixtc dates
+gantt_df[8:length(raw_data_vec),2] <- c("01.04.2019", "01.01.2020", "01.01.2021", "01.01.2019", "01.01.2020", "01.01.2021")
+gantt_df[8:length(raw_data_vec),3] <- c("01.01.2020", "01.01.2021", "01.01.2022", "01.01.2020", "01.01.2021", "01.01.2022")
+
+# column class as Date
+gantt_df$start <- anydate(gantt_df$start)
+gantt_df$end <- anydate(gantt_df$end)
+  # add missing values by hand
+gantt_df$end[[2]] <- as.Date("2020-12-31")
+gantt_df$end[[4]] <- as.Date("2022-03-21")
+gantt_df$end[[5]] <- as.Date("2020-12-31")
+gantt_df$end[[6]] <- as.Date("2021-12-31")
+
+# add column for grouping
+gantt_df$building <- c(rep("MGH",4), rep("Hoepfner",3), rep("FZI", 6))
+
+# Gantt chart
+ggplot(gantt_df,
+       aes(
+         x = start,
+         xend = end,
+         y = data_input,
+         yend = data_input,
+         color = building
+       )) +
+  theme_bw() +
+  theme(axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        legend.title = element_blank(),
+        axis.title.y = element_blank()) +
+  geom_segment(size = 10) +
+  labs(title = "Rohdaten nach Gebäuden",
+       x = "Jahr",
+       y = "none")
+
+ggsave(filename = "Rohdatenverfügbarkeit.png",
+       device = "png",
+       path = "./graphs/",
+       dpi = 320,
+       width = 12,
+       height = 6
+)
+
+
+```
+
+# test field
+
+```{r test}
+rbind(raw_TeFak_1)
+
+str_sub(raw_TeFak_12$`Ab-Zeit`, -8, -1)
+```

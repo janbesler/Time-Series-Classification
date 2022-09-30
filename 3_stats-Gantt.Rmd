@@ -1,0 +1,550 @@
+---
+title: "basic analysis"
+author: "Jan Besler"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# libraries
+
+```{r setup, echo=FALSE}
+# load libraries
+library(knitr)      # use .Rmd files
+
+  # reading data
+library(readr)      # reading csv
+library(data.table) # fast data manipulation
+library(readxl)     # read in excel sheets
+
+  # manipulate data
+library(tidyr)      # manipulating data
+library(dplyr)      # manipulating data
+library(rlist)      # working with lists
+library(stringr)    # work with strings
+library(tibble)     # create data frames
+library(stringi)    # process charactar strings
+library(lubridate)  # transform character into dates
+library(epitools)   # time manipulation
+library(lubridate)  # time manipulation (quarters)
+
+  # statistics
+library(Matrix)     # required for lme4
+library(tseries)    # time series properties
+
+  # visuals
+library(ggplot2)    # make graphs
+library(ggExtra)    # additional functionality for ggplot2
+library(ggpubr)     # combine multiple graphs into one
+library(gridExtra)  # table management
+library(patchwork)  # align multiple graphs
+```
+
+# data import
+
+reading in different sheets from the excel table according to our needs
+
+```{r import}
+# read in BDEW excel table
+  # H0
+BDEW_H0 <- read_xls("./data/Profile_BDEW/ReprДsentative Profile VDEW.xls",
+                      sheet = "H0",
+                      skip = 3,
+                      n_max = 96,
+                      col_names = c("Time",
+                                    "WiSa", "WiSo", "WiMoFr",
+                                    "SoSa", "SoSo", "SoMoFr",
+                                    "UeberSa", "UeberSo", "UeberMoFr"))
+  # add hour column
+BDEW_H0$hour <- as.integer(substr(BDEW_H0$Time, 12,13))
+  
+  # G1 - commercial workdays 8-18 o'clock
+BDEW_G1 <- read_xls("./data/Profile_BDEW/ReprДsentative Profile VDEW.xls",
+                      sheet = "G1",
+                      skip = 3,
+                      n_max = 96,
+                      col_names = c("Time",
+                                    "WiSa", "WiSo", "WiMoFr",
+                                    "SoSa", "SoSo", "SoMoFr",
+                                    "UeberSa", "UeberSo", "UeberMoFr"))
+  # add hour column
+BDEW_G1$hour <- as.integer(substr(BDEW_G1$Time, 12,13))
+
+  # G5 - bakery
+BDEW_G5 <- read_xls("./data/Profile_BDEW/ReprДsentative Profile VDEW.xls",
+                      sheet = "G5",
+                      skip = 3,
+                      n_max = 96,
+                      col_names = c("Time",
+                                    "WiSa", "WiSo", "WiMoFr",
+                                    "SoSa", "SoSo", "SoMoFr",
+                                    "UeberSa", "UeberSo", "UeberMoFr"))
+  # add hour column
+BDEW_G5$hour <- as.integer(substr(BDEW_G5$Time, 12,13))
+
+# load data from previous files
+data <- read_csv("./data/predoneData.csv")
+data$BDEW_Season <- ifelse(data$month >= 12 | data$month <= 2, "Winter",
+              ifelse(data$month >= 6 & data$month <= 9, "Summer", "Uebergang"))
+data$BDEW_week <- ifelse(data$dayOfWeek == "Sun", 3,
+                         ifelse(data$dayOfWeek == "Sat", 2, 1))
+data$hour <- as.integer(data$hour)
+```
+
+
+# complete graphs
+
+all values have to be scaled to be compared with different magnitudes of measurements.
+
+### function
+
+```{r scaling}
+# index values
+scaledSeason <- function(data) {
+  result <-
+    vector(mode = "numeric", length = nrow(data))
+  for (j in 2:ncol(data)) {
+    for (i in 1:nrow(data)) {
+      result[i] <- (data[i, j] - mean(data[,j], na.rm = TRUE)) / sd(data[,j], na.rm = TRUE)
+    }
+    data <- cbind(data, result)
+    colnames(data)[j + 12] <-
+      paste0(names(data)[j], "_ind")
+  }
+  return(data)
+}
+```
+
+### mean
+
+```{r BDEW_data}
+# create matrix
+compare_df <- matrix(data = NA,
+                     ncol = 14,
+                     nrow = 3*24)
+# fill matrix
+colnames(compare_df) <- c("Time", "Season",
+                          "MoFrKIT", "SaKIT", "SoKIT",
+                          "MoFrH0", "SaH0", "SoH0",
+                          "MoFrG1", "SaG1", "SoG1",
+                          "MoFrG5", "SaG5", "SoG5")
+compare_df[,1] <- rep(seq(0,23,1), 3)
+compare_df[1:24,2] <- rep("Winter", 24)
+compare_df[25:48,2] <- rep("Summer", 24)
+compare_df[49:72,2] <- rep("Transition", 24)
+
+# fill with KIT data
+daytypes <- c("MoFr", "Sa", "So")
+for(j in 1:max(data$BDEW_week)) {
+  # winter
+  for (i in 0:23) {
+    result <-
+      data[data$hour == i & data$BDEW_Season == "Winter" & data$BDEW_week == j, "MGH"]
+    compare_df[i + 1, paste0(daytypes[j], "KIT")] <-
+      mean(result[["MGH"]], na.rm = TRUE)
+  }
+  # summer
+  for (i in 0:23) {
+    result <-
+      data[data$hour == i & data$BDEW_Season == "Summer" & data$BDEW_week == j, "MGH"]
+    compare_df[i + 25, paste0(daytypes[j], "KIT")] <-
+      mean(result[["MGH"]], na.rm = TRUE)
+  }
+  # übergangszeit
+  for (i in 0:23) {
+    result <-
+      data[data$hour == i & data$BDEW_Season == "Uebergang" & data$BDEW_week == j, "MGH"]
+    compare_df[i + 49, paste0(daytypes[j], "KIT")] <-
+      mean(result[["MGH"]], na.rm = TRUE)
+  }
+}
+
+# fill with BDEW data
+  # H0
+for(j in 1:length(daytypes)) {
+  # winter
+  for (i in 0:23) {
+    result <-
+      BDEW_H0[BDEW_H0$hour == i, paste0("Wi", daytypes[j])]
+    compare_df[i + 1, paste0(daytypes[j], "H0")] <-
+      mean(result[[paste0("Wi", daytypes[j])]], na.rm = TRUE)
+  }
+  # summer
+  for (i in 0:23) {
+    result <-
+      BDEW_H0[BDEW_H0$hour == i, paste0("So", daytypes[j])]
+    compare_df[i + 25, paste0(daytypes[j], "H0")] <-
+      mean(result[[paste0("So", daytypes[j])]], na.rm = TRUE)
+  }
+  # übergangszeit
+  for (i in 0:23) {
+    result <-
+      BDEW_H0[BDEW_H0$hour == i, paste0("Ueber", daytypes[j])]
+    compare_df[i + 49, paste0(daytypes[j], "H0")] <-
+      mean(result[[paste0("Ueber", daytypes[j])]], na.rm = TRUE)
+  }
+}
+  # G1
+for(j in 1:length(daytypes)) {
+  # winter
+  for (i in 0:23) {
+    result <-
+      BDEW_G1[BDEW_G1$hour == i, paste0("Wi", daytypes[j])]
+    compare_df[i + 1, paste0(daytypes[j], "G1")] <-
+      mean(result[[paste0("Wi", daytypes[j])]], na.rm = TRUE)
+  }
+  # summer
+  for (i in 0:23) {
+    result <-
+      BDEW_G1[BDEW_G1$hour == i, paste0("So", daytypes[j])]
+    compare_df[i + 25, paste0(daytypes[j], "G1")] <-
+      mean(result[[paste0("So", daytypes[j])]], na.rm = TRUE)
+  }
+  # übergangszeit
+  for (i in 0:23) {
+    result <-
+      BDEW_G1[BDEW_G1$hour == i, paste0("Ueber", daytypes[j])]
+    compare_df[i + 49, paste0(daytypes[j], "G1")] <-
+      mean(result[[paste0("Ueber", daytypes[j])]], na.rm = TRUE)
+  }
+}
+  # G5
+for(j in 1:length(daytypes)) {
+  # winter
+  for (i in 0:23) {
+    result <-
+      BDEW_G5[BDEW_G5$hour == i, paste0("Wi", daytypes[j])]
+    compare_df[i + 1, paste0(daytypes[j], "G5")] <-
+      mean(result[[paste0("Wi", daytypes[j])]], na.rm = TRUE)
+  }
+  # summer
+  for (i in 0:23) {
+    result <-
+      BDEW_G5[BDEW_G5$hour == i, paste0("So", daytypes[j])]
+    compare_df[i + 25, paste0(daytypes[j], "G5")] <-
+      mean(result[[paste0("So", daytypes[j])]], na.rm = TRUE)
+  }
+  # übergangszeit
+  for (i in 0:23) {
+    result <-
+      BDEW_G5[BDEW_G5$hour == i, paste0("Ueber", daytypes[j])]
+    compare_df[i + 49, paste0(daytypes[j], "G5")] <-
+      mean(result[[paste0("Ueber", daytypes[j])]], na.rm = TRUE)
+  }
+}
+
+# turn into data frame to use in ggplot
+compare_df <- as.data.frame(compare_df)
+for (i in 1:ncol(compare_df)){
+  # skip for season column
+  if(i == 2)
+    next
+  else
+    compare_df[,i] <- as.numeric(compare_df[,i])
+}
+
+# create sub data frames
+compare_all <- rbind(
+  scaledSeason(compare_df[compare_df$Season == "Winter",-2]),
+  scaledSeason(compare_df[compare_df$Season == "Summer",-2]),
+  scaledSeason(compare_df[compare_df$Season == "Transition",-2])
+)
+compare_all$season <- compare_df$Season
+
+# test for differences
+t.test(compare_all$MoFrKIT_ind, compare_all$MoFrH0_ind)
+t.test(compare_all$MoFrKIT_ind, compare_all$MoFrG1_ind)
+t.test(compare_all$MoFrKIT_ind, compare_all$MoFrG5_ind)
+```
+
+### visualization
+
+```{r bdew_graphs}
+# Werktags
+werktagsGraph <- ggplot(
+  data = compare_all,
+  aes(x = Time)) +
+  geom_line(aes(y = MoFrH0_ind, color = "H0"), alpha = 0.3) +
+  geom_line(aes(y = MoFrG1_ind, color = "G1"), alpha = 0.3) +
+  geom_line(aes(y = MoFrG5_ind, color = "G5"), alpha = 0.7) +
+  geom_line(aes(y = MoFrKIT_ind, color = "district")) +
+  ggtitle("Weekdays") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank(),
+        strip.placement = "outside",
+        strip.background = element_blank()) +
+  labs(x = "Time of day") +
+  facet_grid(as.factor(season) ~ .,
+             switch = "y")
+
+# Samstag
+samstagGraph <- ggplot(
+  data = compare_all,
+  aes(x = Time)) +
+  geom_line(aes(y = SaH0_ind, color = "H0"), alpha = 0.3) +
+  geom_line(aes(y = SaG1_ind, color = "G1"), alpha = 0.6) +
+  geom_line(aes(y = SaG5_ind, color = "G5"), alpha = 0.6) +
+  geom_line(aes(y = SaKIT_ind, color = "district")) +
+  ggtitle("Saturday") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank(),
+        strip.text.y = element_blank()) +
+  labs(x = "Time of day") +
+  facet_grid(as.factor(season) ~ .,
+             switch = "y")
+
+# Sonntag
+sonntagGraph <- ggplot(
+  data = compare_all,
+  aes(x = Time)) +
+  geom_line(aes(y = SoH0_ind, color = "H0"), alpha = 0.4) +
+  geom_line(aes(y = SoG1_ind, color = "G1"), alpha = 0.4) +
+  geom_line(aes(y = SoG5_ind, color = "G5"), alpha = 0.4) +
+  geom_line(aes(y = SoKIT_ind, color = "district")) +
+  ggtitle("Sunday") +
+  theme_bw() +
+  theme(legend.title = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank(),
+        strip.text.y = element_blank()) +
+  labs(x = "time of day") +
+  facet_grid(as.factor(season) ~ .,
+             switch = "y")
+
+ggarrange(werktagsGraph, samstagGraph, sonntagGraph,
+          ncol = 3,
+          nrow = 1,
+          widths = c(1.5, 1.4, 1.8))
+
+ggsave("./graphs/BDEW_KIT_comparison.png",
+       width = 25,
+       height = 8,
+       units = "cm",
+       dpi = 320)
+```
+
+### median
+
+repeating the previous steps with median instead of mean to check on outliers
+
+```{r median}
+# create matrix
+compare_median <- matrix(data = NA,
+                     ncol = 14,
+                     nrow = 3*24)
+# fill matrix
+colnames(compare_median) <- c("Time", "Season",
+                          "MoFrKIT", "SaKIT", "SoKIT",
+                          "MoFrH0", "SaH0", "SoH0",
+                          "MoFrG1", "SaG1", "SoG1",
+                          "MoFrG5", "SaG5", "SoG5")
+compare_median[,1] <- rep(seq(0,23,1), 3)
+compare_median[1:24,2] <- rep("Winter", 24)
+compare_median[25:48,2] <- rep("Sommer", 24)
+compare_median[49:72,2] <- rep("Uebergangszeit", 24)
+
+# fill with KIT data
+daytypes <- c("MoFr", "Sa", "So")
+for(j in 1:max(data$BDEW_week)) {
+  # winter
+  for (i in 0:23) {
+    result <-
+      data[data$hour == i & data$BDEW_Season == "Winter" & data$BDEW_week == j, "MGH"]
+    compare_median[i + 1, paste0(daytypes[j], "KIT")] <-
+      median(result[["MGH"]], na.rm = TRUE)
+  }
+  # summer
+  for (i in 0:23) {
+    result <-
+      data[data$hour == i & data$BDEW_Season == "Summer" & data$BDEW_week == j, "MGH"]
+    compare_median[i + 25, paste0(daytypes[j], "KIT")] <-
+      median(result[["MGH"]], na.rm = TRUE)
+  }
+  # übergangszeit
+  for (i in 0:23) {
+    result <-
+      data[data$hour == i & data$BDEW_Season == "Uebergang" & data$BDEW_week == j, "MGH"]
+    compare_median[i + 49, paste0(daytypes[j], "KIT")] <-
+      median(result[["MGH"]], na.rm = TRUE)
+  }
+}
+
+# fill with BDEW data
+  # H0
+for(j in 1:length(daytypes)) {
+  # winter
+  for (i in 0:23) {
+    result <-
+      BDEW_H0[BDEW_H0$hour == i, paste0("Wi", daytypes[j])]
+    compare_median[i + 1, paste0(daytypes[j], "H0")] <-
+      median(result[[paste0("Wi", daytypes[j])]], na.rm = TRUE)
+  }
+  # summer
+  for (i in 0:23) {
+    result <-
+      BDEW_H0[BDEW_H0$hour == i, paste0("So", daytypes[j])]
+    compare_median[i + 25, paste0(daytypes[j], "H0")] <-
+      median(result[[paste0("So", daytypes[j])]], na.rm = TRUE)
+  }
+  # übergangszeit
+  for (i in 0:23) {
+    result <-
+      BDEW_H0[BDEW_H0$hour == i, paste0("Ueber", daytypes[j])]
+    compare_median[i + 49, paste0(daytypes[j], "H0")] <-
+      median(result[[paste0("Ueber", daytypes[j])]], na.rm = TRUE)
+  }
+}
+  # G1
+for(j in 1:length(daytypes)) {
+  # winter
+  for (i in 0:23) {
+    result <-
+      BDEW_G1[BDEW_G1$hour == i, paste0("Wi", daytypes[j])]
+    compare_median[i + 1, paste0(daytypes[j], "G1")] <-
+      median(result[[paste0("Wi", daytypes[j])]], na.rm = TRUE)
+  }
+  # summer
+  for (i in 0:23) {
+    result <-
+      BDEW_G1[BDEW_G1$hour == i, paste0("So", daytypes[j])]
+    compare_median[i + 25, paste0(daytypes[j], "G1")] <-
+      median(result[[paste0("So", daytypes[j])]], na.rm = TRUE)
+  }
+  # übergangszeit
+  for (i in 0:23) {
+    result <-
+      BDEW_G1[BDEW_G1$hour == i, paste0("Ueber", daytypes[j])]
+    compare_median[i + 49, paste0(daytypes[j], "G1")] <-
+      median(result[[paste0("Ueber", daytypes[j])]], na.rm = TRUE)
+  }
+}
+  # G5
+for(j in 1:length(daytypes)) {
+  # winter
+  for (i in 0:23) {
+    result <-
+      BDEW_G5[BDEW_G5$hour == i, paste0("Wi", daytypes[j])]
+    compare_median[i + 1, paste0(daytypes[j], "G5")] <-
+      median(result[[paste0("Wi", daytypes[j])]], na.rm = TRUE)
+  }
+  # summer
+  for (i in 0:23) {
+    result <-
+      BDEW_G5[BDEW_G5$hour == i, paste0("So", daytypes[j])]
+    compare_median[i + 25, paste0(daytypes[j], "G5")] <-
+      median(result[[paste0("So", daytypes[j])]], na.rm = TRUE)
+  }
+  # übergangszeit
+  for (i in 0:23) {
+    result <-
+      BDEW_G5[BDEW_G5$hour == i, paste0("Ueber", daytypes[j])]
+    compare_median[i + 49, paste0(daytypes[j], "G5")] <-
+      median(result[[paste0("Ueber", daytypes[j])]], na.rm = TRUE)
+  }
+}
+
+# turn into data frame to use in ggplot
+compare_median <- as.data.frame(compare_median)
+for (i in 1:ncol(compare_median)){
+  # skip for season column
+  if(i == 2)
+    next
+  else
+    compare_median[,i] <- as.numeric(compare_median[,i])
+}
+
+# create sub data frames
+compare_all_median <- rbind(
+  scaledSeason(compare_median[compare_median$Season == "Winter",-2]),
+  scaledSeason(compare_median[compare_median$Season == "Sommer",-2]),
+  scaledSeason(compare_median[compare_median$Season == "Uebergangszeit",-2])
+)
+compare_all_median$season <- compare_median$Season
+
+# test for differences
+t.test(compare_all_median$MoFrKIT_ind, compare_all_median$MoFrH0_ind)
+t.test(compare_all_median$MoFrKIT_ind, compare_all_median$MoFrG1_ind)
+t.test(compare_all_median$MoFrKIT_ind, compare_all_median$MoFrG5_ind)
+```
+
+### t-test
+
+perform t-test on difference of KIT data.
+
+Columns have to be sticked together as vector to be fully utilised in t-test.
+
+```{r t-test}
+# create two vectors
+KIT_mean <- as.vector(cbind(
+  compare_all[, 'MoFrKIT_ind'],
+  compare_all[, 'SaKIT_ind'],
+  compare_all[, 'SoKIT_ind']
+))
+KIT_median <- as.vector(cbind(
+  compare_all_median[, 'MoFrKIT_ind'],
+  compare_all_median[, 'SaKIT_ind'],
+  compare_all_median[, 'SoKIT_ind']
+))
+# perform test
+t.test(KIT_median, KIT_mean)
+```
+
+p-value of 1 results thus the H0 has to be accepted. Thus the mean difference is 0 and can be seen as negligible.
+
+# time series
+
+checking if the time series is stationary or not. Using Augmented Dickey Fuller Test on all raw data time series for each building.
+
+```{r TS_properties}
+# FZI
+adf.test(na.omit(data$FZI))
+# MGH
+adf.test(na.omit(data$MGH))
+# Hoepfner
+adf.test(na.omit(data$Hoepfner))
+```
+
+For all tested time series the ADF results in rejecting the H0 for all common significance levels and thus all data can be classified as stationary.
+
+# testfield
+
+```{r test}
+# standardisation
+j = 5
+result <-
+    vector(mode = "numeric", length = nrow(compare_median))
+for (j in 3:ncol(compare_median)) {
+  for (i in 1:nrow(compare_median)) {
+    result[i] <-
+      (compare_median[i, j] - mean(compare_median[, j], na.rm = TRUE)) / sd(compare_median[, j], na.rm = TRUE)
+  }
+}
+```
+
+
+# notizen
+
+mehrere Plots ineinander für vergleich von BDEW & unserer Lastgänge
+drei Graphen untereinander für Sommer, Winter & Übergangszeit
+für H0, H1 & sonstige Lastgänge
+
+statistische MEtriken bei Clustern
+  - auch gleiche Kategorien wie bei Durschnittsberechnung
+  
+  - vergleich zwischen den gewerken Haushalt genuaigkeit gegen Gewerbe genauigkeit oder so...
+  
+  - story für quartiers gedanken mit reinbringen -> vergleiche BDEW theorie & reales quartier
+  
+  powerpoint mit allen Graphen
+  
+  BDEW Logik folgen für anfängliche Vergleiche.
+  

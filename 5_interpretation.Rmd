@@ -1,0 +1,809 @@
+---
+title: "Cluster Assignment"
+author: "Jan Besler"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# libraries
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# libraries
+library(tidyverse)
+library(data.table)
+library(lubridate)
+library(cluster)
+library(ggplot2)
+library(ggExtra)
+library(ggpubr)
+library(factoextra)
+library(clusterCrit)
+library(dtwclust)
+library(scales)
+```
+
+utilising Taken's Embedding Theorem R
+
+1.  grouping the data in daily/weekly/monthly sets
+2.  draw diagram of clusters
+3.  fine tune the individual clusters
+4.  try to connect all data sets and run one big cluster
+
+# data import
+
+```{r data import}
+data_wide <- read_csv("./data/data_wide.csv")
+data_standardised <- read_csv("./data/data_standardised.csv")
+cluster_whole <- read_csv("./data/cluster_whole.csv")
+
+# cluster matrices
+MGH_cluster <- read_csv("./data/cluster_MGH.csv")
+FZI_cluster <- read_csv("./data/cluster_FZI.csv")
+Hoepfner_cluster <- read_csv("./data/cluster_Hoepfner.csv")
+TeFak_cluster <- read_csv("./data/cluster_TeFak.csv")
+BDEW_cluster <- read_csv("./data/cluster_BDEW.csv")
+
+# centre matrices
+MGH_centre <- read_csv("./data/centre_MGH.csv")
+FZI_centre <- read_csv("./data/centre_FZI.csv")
+Hoepfner_centre <- read_csv("./data/centre_Hoepfner.csv")
+TeFak_centre <- read_csv("./data/centre_TeFak.csv")
+```
+
+# transform
+
+create full data set with cluster and meta information & use descriptive statistics to find properties of clusters.
+
+```{r transform data}
+meta_evaluation <- function(data, cluster_data) {
+  # add cluster information to wide data set
+  data_wide <- data %>%
+    mutate(cluster = cluster_data)
+  
+  # change back to long format
+  data_long <- data_wide %>%
+    pivot_longer(
+      cols = c(-date,-cluster,-location),
+      names_to = "time",
+      values_to = "Verbrauch"
+    )
+  # change date column type
+  data_long$date <- dmy(data_long$date)
+  
+  # add meta information
+  setDT(data_long)
+  # weekdays
+  data_long <- data_long[, dayOfWeek := weekdays(date, abbreviate = TRUE)]
+  # calendar week
+  data_long <- data_long[, calendarWeek := isoweek(date)]
+  # month
+  data_long <- data_long[, month := month(date)]
+  # BDEW weekend
+  data_long <- data_long[, weekend :=
+                          ifelse(dayOfWeek == "Sun",
+                                  "Sunday",
+                                  ifelse(dayOfWeek == "Sat", "Saturday", "working day"))]
+  # variable for BDEW-season
+  data_long <- data_long[, BDEWSeason :=
+                          ifelse(month >= 12 | month <= 2,
+                                  "Winter",
+                                  ifelse(month >= 6 & month <= 9, "Summer", "Transition"))]
+  # hour variable
+  data_long <- data_long[, hour := as.numeric(substr(time, 1, 2))]
+  
+  # reorder column for better looking data frame
+  setcolorder(
+    data_long,
+    c(
+      "date",
+      "location",
+      "cluster",
+      "Verbrauch",
+      "BDEWSeason",
+      "month",
+      "calendarWeek",
+      "dayOfWeek",
+      "weekend",
+      "hour",
+      "time"
+    )
+  )
+  
+  # evaluation
+  # location <- matrix(data = NA,
+  #                    ncol = length(unique(data_long$cluster)),
+  #                    nrow = length(unique(data_long$location)))
+  # month <- matrix(data = NA,
+  #                 ncol = length(unique(data_long$cluster)),
+  #                 nrow = length(unique(data_long$month)))
+  # calendarweek <- matrix(data = NA,
+  #                        ncol = length(unique(data_long$cluster)),
+  #                        nrow = length(unique(data_long$calendarWeek)))
+  # weekday <- matrix(data = NA,
+  #                   ncol = length(unique(data_long$cluster)),
+  #                   nrow = length(unique(data_long$dayOfWeek)))
+  weekend <- matrix(data = NA,
+                    ncol = length(unique(data_long$cluster)),
+                    nrow = length(unique(data_long$weekend)))
+  BDEWSeason <- matrix(data = NA,
+                       ncol = length(unique(data_long$cluster)),
+                       nrow = length(unique(data_long$BDEWSeason)))
+  
+  # fill tables
+  for (i in 1:length(unique(data_long$cluster))) {
+    df <- data_long[data_long[, cluster == i]]
+    # location
+#    location[, i] <-
+#      table(factor(df$location, levels = c("MGH", "FZI", "Hopefner", "TechnologieFabrik"))) /
+#      table(data_long$location)
+#    rownames(location) <-
+#      names(table(factor(df$location, levels = c("MGH", "FZI", "Hopefner", "TechnologieFabrik"))))
+    # month
+    # month[, i] <-
+    #   table(factor(df$month, levels = 1:12)) /
+    #   table(data_long$month)
+    # rownames(month) <- names(table(factor(df$month, levels = 1:12)))
+    # # calenderweek
+    # calendarweek[, i] <-
+    #   table(factor(df$calendarWeek, levels = 1:53)) /
+    #   table(data_long$calendarWeek)
+    # rownames(calendarweek) <- names(table(factor(df$calendarWeek, levels = 1:53)))
+    # # day of the week
+    # weekday[, i] <-
+    #   table(factor(df$dayOfWeek, levels = c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))) /
+    #   table(data_long$dayOfWeek)
+    # rownames(weekday) <-
+    #   names(table(factor(df$dayOfWeek, levels = c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))))
+    # weekend
+    weekend[, i] <-
+      table(factor(df$weekend, levels = c("Saturday", "Sunday", "working day"))) /
+      table(data_long$weekend)
+    rownames(weekend) <- names(table(factor(df$weekend, levels = c("Saturday", "Sunday", "working day"))))
+    # BDEW-Season1
+    BDEWSeason[, i] <-
+      table(factor(df$BDEWSeason, levels = c("Summer", "Transition", "Winter"))) /
+      table(data_long$BDEWSeason)
+    rownames(BDEWSeason) <- names(table(factor(df$BDEWSeason, levels = c("Summer", "Transition", "Winter"))))
+  }
+  evaluate_list <- list(
+#    "location" = location,
+    # "month" = month,
+    # "calendarweek" = calendarweek,
+    # "weekday" = weekday,
+    "weekend" = weekend,
+    "BDEWSeason" = BDEWSeason
+  )
+  return(evaluate_list)
+}
+```
+
+# evaluation
+
+```{r evaluation_buildings, eval=FALSE}
+MGH_eval <- meta_evaluation(
+  data_wide[data_wide$location == "MGH",],
+  MGH_cluster$`k-means`
+)
+
+FZI_eval <- meta_evaluation(
+  data_wide[data_wide$location == "FZI",],
+  FZI_cluster$`k-means`
+)
+
+Hoepfner_eval <- meta_evaluation(
+  data_wide[data_wide$location == "Hoepfner",],
+  Hoepfner_cluster$`k-means`
+)
+
+TeFak_eval <- meta_evaluation(
+  data_wide[data_wide$location == "TechnologieFabrik",],
+  TeFak_cluster$`c-means`
+)
+```
+
+
+# visualisation
+
+### function
+
+```{r vis_function}
+graph_area <- function(data, cluster_wide) {
+  cluster_data <- cluster_wide
+  data <- data %>%
+    mutate(cluster = cluster_data)
+  graph_area_df <- as.data.frame(matrix(
+    data = NA,
+    ncol = length(unique(data$cluster)) * 2,
+    nrow = 96
+  ))
+  # left value min, right max
+  for (i in 1:length(unique(data$cluster))) {
+    graph_area_df[, (2 * i - 1):(2 * i)] <-
+      t(data[c(which.max(rowMeans(data[data$cluster == i, -97])),
+               which.min(rowMeans(data[data$cluster == i, -97]))), -97])
+  }
+  return(graph_area_df)
+}
+
+z_score <- function(data){
+  z = (data - mean(data)) / sd(data)
+  return(z)
+}
+
+cluster_df <- function(data, cluster_data) {
+  # data preparation
+  data_cl <- data %>% mutate(cluster = cluster_data)
+  min_max <-
+    matrix(data = NA,
+           nrow = 96,
+           ncol = length(unique(data_cl$cluster)) * 2)
+  density_plot <- vector("list", length = length(unique(data_cl$cluster)))
+  for (k in 1:length(unique(data_cl$cluster))) {
+    data_k <- data_cl[data_cl$cluster == k, 1:96]
+    # min & max values
+    min_vec <- vector(mode = "numeric", length = 96)
+    max_vec <- vector(mode = "numeric", length = 96)
+    for (i in 1:96) {
+      min_vec[i] <- min(data_k[, i])
+      max_vec[i] <- max(data_k[, i])
+    }
+    min_max[, (2 * k - 1):(2 * k)] <- t(rbind(min_vec, max_vec))
+    # density
+    density_plot[[k]] <- rowMeans(data_k)
+  }
+  # centre
+  cluster <- kmeans(
+    data,
+    centers = length(unique(data_cl$cluster)),
+    iter.max = 25,
+    nstart = 10
+  )
+  centre <- as.data.frame(cluster$centers)
+  # time stamps
+  time_stamps <- seq(from = as.POSIXct("2019-01-01", tz = "GMT"), length.out = 96, by = "15 min")
+  # one data frame
+  df <- as.data.frame(cbind(min_max, t(centre)))
+  df$time <- time_stamps
+  final_list <- list("main_graph" = df, "density" = density_plot)
+  return(final_list) 
+}
+```
+
+### graphs
+
+```{r graph_data, eval=FALSE}
+# FZI
+FZI <- cluster_df(data_wide[data_wide$location == "FZI",2:97], FZI_cluster$`k-means`)
+names(FZI$main_graph) <- c("min_vec_cl1", "max_vec_cl1",
+                           "min_vec_cl2", "max_vec_cl2",
+                           "cl1", "cl2", "time")
+density_cl1_FZI <- as.data.frame(FZI$density[[1]])
+names(density_cl1_FZI) <- c("avg")
+density_cl2_FZI <- as.data.frame(FZI$density[[2]])
+names(density_cl2_FZI) <- c("avg")
+
+# MGH
+MGH <- cluster_df(data_wide[data_wide$location == "MGH",2:97], MGH_cluster$`k-means`)
+names(MGH$main_graph) <- c("min_vec_cl1", "max_vec_cl1",
+                           "min_vec_cl2", "max_vec_cl2",
+                           "min_vec_cl3", "max_vec_cl3",
+                           "min_vec_cl4", "max_vec_cl4",
+                           "cl1", "cl2", "cl3", "cl4", "time")
+density_cl1_MGH <- as.data.frame(MGH$density[[1]])
+names(density_cl1_MGH) <- c("avg")
+density_cl2_MGH <- as.data.frame(MGH$density[[2]])
+names(density_cl2_MGH) <- c("avg")
+density_cl3_MGH <- as.data.frame(MGH$density[[3]])
+names(density_cl3_MGH) <- c("avg")
+density_cl4_MGH <- as.data.frame(MGH$density[[4]])
+names(density_cl4_MGH) <- c("avg")
+
+# Hoepfner
+Hoepfner <- cluster_df(data_wide[data_wide$location == "Hoepfner",2:97], Hoepfner_cluster$`k-means`)
+names(Hoepfner$main_graph) <- c("min_vec_cl1", "max_vec_cl1",
+                           "min_vec_cl2", "max_vec_cl2",
+                           "cl1", "cl2", "time")
+density_cl1_Hoepfner <- as.data.frame(Hoepfner$density[[1]])
+names(density_cl1_Hoepfner) <- c("avg")
+density_cl2_Hoepfner <- as.data.frame(Hoepfner$density[[2]])
+names(density_cl2_Hoepfner) <- c("avg")
+
+# TeFak
+TeFak <- cluster_df(data_wide[data_wide$location == "TechnologieFabrik",2:97], TeFak_cluster$`k-means`)
+names(TeFak$main_graph) <- c("min_vec_cl1", "max_vec_cl1",
+                           "min_vec_cl2", "max_vec_cl2",
+                           "cl1", "cl2", "time")
+density_cl1_TeFak <- as.data.frame(TeFak$density[[1]])
+names(density_cl1_TeFak) <- c("avg")
+density_cl2_TeFak <- as.data.frame(TeFak$density[[2]])
+names(density_cl2_TeFak) <- c("avg")
+```
+
+##### FZI
+
+```{r FZI_vis, eval=T}
+FZI_1 <- ggplot(as.data.frame(FZI$main_graph), aes(x = time)) +
+  # filled area
+  geom_line(aes(y = min_vec_cl1)) + # min
+  geom_line(aes(y = max_vec_cl1)) + # max
+  geom_ribbon(aes(
+    x = time,
+    ymin = min_vec_cl1,
+    ymax = max_vec_cl1),
+  fill = "gray",
+  alpha = 0.4) +
+  # centre
+  geom_line(aes(y = cl1), col = "#b58900", size = 0.5) +
+  # density
+  geom_point(data = density_cl1_FZI,
+             aes(x = as.POSIXct("2019-01-01 01:00:00"), y = avg), col = NA) +
+  # effects
+  ggtitle("First Cluster") +
+  theme_bw() +
+  theme(legend.position = "none",
+        strip.placement = "outside",
+        strip.background = element_blank()) +
+  scale_y_continuous(limits = c(0, 60000)) +
+  scale_x_datetime(labels = date_format("%H:%M")) +
+  labs(x = "Time of day",
+       y = "Consumption in kWh")
+FZI_1 <- ggMarginal(FZI_1, type = "density", margins = "y")
+
+FZI_2 <- ggplot(as.data.frame(FZI$main_graph), aes(x = time)) +
+  # filled area
+  geom_line(aes(y = min_vec_cl2)) + # min
+  geom_line(aes(y = max_vec_cl2)) + # max
+  geom_ribbon(aes(
+    x = time,
+    ymin = min_vec_cl2,
+    ymax = max_vec_cl2),
+  fill = "gray",
+  alpha = 0.4) +
+  # centre
+  geom_line(aes(y = cl2), col = "#b58900", size = 0.5) +
+  # marginal density
+  geom_point(data = density_cl2_FZI,
+             aes(x = as.POSIXct("2019-01-01 01:00:00"), y = avg), col = NA) +
+  # effects
+  ggtitle("Second Cluster") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        strip.placement = "outside",
+        strip.background = element_blank()) +
+  scale_y_continuous(limits = c(0, 60000)) +
+  scale_x_datetime(labels = date_format("%H:%M")) +
+  labs(x = "Time of day",
+       y = "Consumption in kWh")
+FZI_2 <- ggMarginal(FZI_2, type = "density", margins = "y")
+
+ggarrange(
+  FZI_1, FZI_2,
+  ncol = 2, nrow = 1,
+  widths = c(1.3, 1.1)
+)
+
+ggsave("./graphs/FZI_cluster_profiles.png",
+       dpi = 320,
+       width = 16,
+       height = 5,
+       units = "cm")
+```
+
+##### MGH
+
+```{r MGH_vis, eval=FALSE}
+MGH_1 <- ggplot(as.data.frame(MGH$main_graph),
+                aes(x = time)) +
+  # filled area
+  geom_line(aes(y = min_vec_cl1)) + # min
+  geom_line(aes(y = max_vec_cl1)) + # max
+  geom_ribbon(aes(
+    x = time,
+    ymin = min_vec_cl1,
+    ymax = max_vec_cl1),
+  fill = "gray",
+  alpha = 0.4) +
+  # centre
+  geom_line(aes(y = cl4), col = "#b58900", size = 0.5) +
+  # marginal density
+  geom_point(data = density_cl1_MGH,
+             aes(x = as.POSIXct("2019-01-01 01:00:00"), y = avg), col = NA) +
+  # effects
+  ggtitle("First Cluster") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.ticks.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        strip.placement = "outside",
+        strip.background = element_blank()) +
+  scale_y_continuous(limits = c(0, 100000)) +
+  scale_x_datetime(labels = date_format("%H:%M")) +
+  labs(x = "Time of day",
+       y = "Consumption in kWh")
+MGH_1 <- ggMarginal(MGH_1, type = "density", margins = "y")
+
+MGH_2 <- ggplot(as.data.frame(MGH$main_graph),
+                aes(x = time)) +
+  # filled area
+  geom_line(aes(y = min_vec_cl2)) + # min
+  geom_line(aes(y = max_vec_cl2)) + # max
+  geom_ribbon(aes(
+    x = time,
+    ymin = min_vec_cl2,
+    ymax = max_vec_cl2),
+  fill = "gray",
+  alpha = 0.4) +
+  # centre
+  geom_line(aes(y = cl3), col = "#b58900", size = 0.5) +
+  # marginal density
+  geom_point(data = density_cl2_MGH,
+             aes(x = as.POSIXct("2019-01-01 01:00:00"), y = avg), col = NA) +
+  # effects
+  ggtitle("Second Cluster") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.ticks.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.text.x = element_blank(),
+        axis.title.y = element_blank(),
+        strip.placement = "outside",
+        strip.background = element_blank()) +
+  scale_y_continuous(limits = c(0, 100000)) +
+  scale_x_datetime(labels = date_format("%H:%M")) +
+  labs(x = "Time of day",
+       y = "Consumption in kWh")
+MGH_2 <- ggMarginal(MGH_2, type = "density", margins = "y")
+
+MGH_3 <- ggplot(as.data.frame(MGH$main_graph),
+                aes(x = time)) +
+  # filled area
+  geom_line(aes(y = min_vec_cl3)) + # min
+  geom_line(aes(y = max_vec_cl3)) + # max
+  geom_ribbon(aes(
+    x = time,
+    ymin = min_vec_cl3,
+    ymax = max_vec_cl3),
+  fill = "gray",
+  alpha = 0.4) +
+  # centre
+  geom_line(aes(y = cl2), col = "#b58900", size = 0.5) +
+  # marginal density
+  geom_point(data = density_cl3_MGH,
+             aes(x = as.POSIXct("2019-01-01 01:00:00"), y = avg), col = NA) +
+  # effects
+  ggtitle("Third Cluster") +
+  theme_bw() +
+  theme(legend.position = "none",
+        #axis.ticks.x = element_blank(),
+        #axis.text.x = element_blank(),
+        strip.placement = "outside",
+        strip.background = element_blank()) +
+  scale_y_continuous(limits = c(0, 100000)) +
+  scale_x_datetime(labels = date_format("%H:%M")) +
+  labs(x = "Time of day",
+       y = "Consumption in kWh")
+MGH_3 <- ggMarginal(MGH_3, type = "density", margins = "y")
+
+MGH_4 <- ggplot(as.data.frame(MGH$main_graph),
+                aes(x = time)) +
+  # filled area
+  geom_line(aes(y = min_vec_cl4)) + # min
+  geom_line(aes(y = max_vec_cl4)) + # max
+  geom_ribbon(aes(
+    x = time,
+    ymin = min_vec_cl4,
+    ymax = max_vec_cl4),
+  fill = "gray",
+  alpha = 0.4) +
+  # centre
+  geom_line(aes(y = cl1), col = "#b58900", size = 0.5) +
+  # marginal density
+  geom_point(data = density_cl4_MGH,
+             aes(x = as.POSIXct("2019-01-01 01:00:00"), y = avg), col = NA) +
+  # effects
+  ggtitle("Fourth Cluster") +
+  theme_bw() +
+  theme(legend.position = "none",
+        #axis.ticks.x = element_blank(),
+        #axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        strip.placement = "outside",
+        strip.background = element_blank()) +
+  scale_y_continuous(limits = c(0, 100000)) +
+  scale_x_datetime(labels = date_format("%H:%M")) +
+  labs(x = "Time of day",
+       y = "Consumption in kWh")
+MGH_4 <- ggMarginal(MGH_4, type = "density", margins = "y")
+
+ggarrange(
+  MGH_1, MGH_2, MGH_3, MGH_4,
+  nrow = 2, ncol = 2,
+  widths = c(1.3,1.1,
+             1.3,1.1)
+)
+
+ggsave("./graphs/MGH_cluster_profiles.png",
+       dpi = 320,
+       width = 16,
+       height = 9,
+       units = "cm")
+```
+
+##### Hoepfner
+
+```{r Hoepfner_vis}
+Hoepfner_1 <- ggplot(as.data.frame(Hoepfner$main_graph), aes(x = time)) +
+  # filled area
+  geom_line(aes(y = min_vec_cl1)) + # min
+  geom_line(aes(y = max_vec_cl1)) + # max
+  geom_ribbon(aes(
+    x = time,
+    ymin = min_vec_cl1,
+    ymax = max_vec_cl1),
+  fill = "gray",
+  alpha = 0.4) +
+  # centre
+  geom_line(aes(y = cl2), col = "#b58900", size = 0.5) +
+  # density
+  geom_point(data = density_cl1_Hoepfner,
+             aes(x = as.POSIXct("2019-01-01 01:00:00"), y = avg), col = NA) +
+  # effects
+  ggtitle("First Cluster") +
+  theme_bw() +
+  theme(legend.position = "none",
+        strip.placement = "outside",
+        strip.background = element_blank()) +
+  scale_y_continuous(limits = c(0, 100000)) +
+  scale_x_datetime(labels = date_format("%H:%M")) +
+  labs(x = "Time of day",
+       y = "Consumption in kWh")
+Hoepfner_1 <- ggMarginal(Hoepfner_1, type = "density", margins = "y")
+
+Hoepfner_2 <- ggplot(as.data.frame(Hoepfner$main_graph), aes(x = time)) +
+  # filled area
+  geom_line(aes(y = min_vec_cl2)) + # min
+  geom_line(aes(y = max_vec_cl2)) + # max
+  geom_ribbon(aes(
+    x = time,
+    ymin = min_vec_cl2,
+    ymax = max_vec_cl2),
+  fill = "gray",
+  alpha = 0.4) +
+  # centre
+  geom_line(aes(y = cl1), col = "#b58900", size = 0.5) +
+  # marginal density
+  geom_point(data = density_cl2_Hoepfner,
+             aes(x = as.POSIXct("2019-01-01 01:00:00"), y = avg), col = NA) +
+  # effects
+  ggtitle("Second Cluster") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        strip.placement = "outside",
+        strip.background = element_blank()) +
+  scale_y_continuous(limits = c(0, 100000)) +
+  scale_x_datetime(labels = date_format("%H:%M")) +
+  labs(x = "Time of day",
+       y = "Consumption in kWh")
+Hoepfner_2 <- ggMarginal(Hoepfner_2, type = "density", margins = "y")
+
+ggarrange(
+  Hoepfner_1, Hoepfner_2,
+  ncol = 2, nrow = 1,
+  widths = c(1.3, 1.1)
+)
+
+ggsave("./graphs/Hoepfner_cluster_profiles.png",
+       dpi = 320,
+       width = 16,
+       height = 5,
+       units = "cm")
+```
+
+##### TeFak
+
+```{r TeFak_vis}
+TeFak_1 <- ggplot(as.data.frame(TeFak$main_graph), aes(x = time)) +
+  # filled area
+  geom_line(aes(y = min_vec_cl1)) + # min
+  geom_line(aes(y = max_vec_cl1)) + # max
+  geom_ribbon(aes(
+    x = time,
+    ymin = min_vec_cl1,
+    ymax = max_vec_cl1),
+  fill = "gray",
+  alpha = 0.4) +
+  # centre
+  geom_line(aes(y = cl2), col = "#b58900", size = 0.5) +
+  # density
+  geom_point(data = density_cl1_TeFak,
+             aes(x = as.POSIXct("2019-01-01 01:00:00"), y = avg), col = NA) +
+  # effects
+  ggtitle("First Cluster") +
+  theme_bw() +
+  theme(legend.position = "none",
+        strip.placement = "outside",
+        strip.background = element_blank()) +
+  scale_y_continuous(limits = c(0, 250000)) +
+  scale_x_datetime(labels = date_format("%H:%M")) +
+  labs(x = "Time of day",
+       y = "Consumption in kWh")
+TeFak_1 <- ggMarginal(TeFak_1, type = "density", margins = "y")
+
+TeFak_2 <- ggplot(as.data.frame(TeFak$main_graph), aes(x = time)) +
+  # filled area
+  geom_line(aes(y = min_vec_cl2)) + # min
+  geom_line(aes(y = max_vec_cl2))+ # max
+  geom_ribbon(aes(
+    x = time,
+    ymin = min_vec_cl2,
+    ymax = max_vec_cl2),
+  fill = "gray",
+  alpha = 0.4) +
+  # centre
+  geom_line(aes(y = cl1), col = "#b58900", size = 0.5) +
+  # marginal density
+  geom_point(data = density_cl2_TeFak,
+             aes(x = as.POSIXct("2019-01-01 01:00:00"), y = avg), col = NA) +
+  # effects
+  ggtitle("Second Cluster") +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        strip.placement = "outside",
+        strip.background = element_blank()) +
+  scale_y_continuous(limits = c(0, 250000)) +
+  scale_x_datetime(labels = date_format("%H:%M")) +
+  labs(x = "Time of day",
+       y = "Consumption in kWh")
+TeFak_2 <- ggMarginal(TeFak_2, type = "density", margins = "y")
+
+ggarrange(
+  TeFak_1, TeFak_2,
+  ncol = 2, nrow = 1,
+  widths = c(1.3, 1.1)
+)
+
+ggsave("./graphs/TeFak_cluster_profiles.png",
+       dpi = 320,
+       width = 16,
+       height = 5,
+       units = "cm")
+```
+
+# test
+
+```{r testield}
+test_3 <- cluster_df(data_wide[data_wide$location == "TechnologieFabrik",2:97], TeFak_cluster$`k-means`)
+
+test <- data_long[1:96, "time"]
+class(test$time)
+test_time <- hm(test$time)
+class(test_time)
+
+
+seq.POSIXt(as.POSIXct(Sys.Date()-(1/12)), as.POSIXct(Sys.Date()+(11/12)), by = "15 min")[1:96]
+datetime <- seq(from = as.POSIXct("2019-01-01", tz = "GMT"), length.out = 96, by = "15 min")
+
+class(rownames(test_3$main_graph))
+
+test_3$main_graph
+rownames(test_3$main_graph)
+```
+
+# debug
+
+```{r debug}
+data <- data_wide[data_wide$location == "TechnologieFabrik",]
+cluster_data <- cluster_df$TeFak
+
+data <- data %>%
+    mutate(cluster = cluster_data)
+  
+  # change back to long format
+  data_long <- data %>%
+    pivot_longer(
+      cols = c(-date,-cluster,-location),
+      names_to = "time",
+      values_to = "Verbrauch"
+    )
+
+  # add meta information
+  setDT(data_long)
+  # weekdays
+  data_long <- data_long[, dayOfWeek := weekdays(date, abbreviate = TRUE)]
+  # calendar week
+  data_long <- data_long[, calendarWeek := isoweek(date)]
+  # month
+  data_long <- data_long[, month := month(date)]
+  # BDEW weekend
+  data_long <- data_long[, weekend :=
+                          ifelse(dayOfWeek == "Sun",
+                                  "Sunday",
+                                  ifelse(dayOfWeek == "Sat", "Saturday", "working day"))]
+  # variable for BDEW-season
+  data_long <- data_long[, BDEWSeason :=
+                          ifelse(month >= 12 | month <= 2,
+                                  "Winter",
+                                  ifelse(month >= 6 & month <= 9, "Summer", "Transition"))]
+  # hour variable
+  data_long <- data_long[, hour := as.numeric(substr(time, 1, 2))]
+  
+  # reorder column for better looking data frame
+  setcolorder(
+    data_long,
+    c(
+      "date",
+      "location",
+      "cluster",
+      "Verbrauch",
+      "BDEWSeason",
+      "month",
+      "calendarWeek",
+      "dayOfWeek",
+      "weekend",
+      "hour",
+      "time"
+    )
+  )
+  
+  # evaluation
+  # location <- matrix(data = NA,
+  #                    ncol = length(unique(data_long$cluster)),
+  #                    nrow = length(unique(data_long$location)))
+  # month <- matrix(data = NA,
+  #                 ncol = length(unique(data_long$cluster)),
+  #                 nrow = length(unique(data_long$month)))
+  # calendarweek <- matrix(data = NA,
+  #                        ncol = length(unique(data_long$cluster)),
+  #                        nrow = length(unique(data_long$calendarWeek)))
+  # weekday <- matrix(data = NA,
+  #                   ncol = length(unique(data_long$cluster)),
+  #                   nrow = length(unique(data_long$dayOfWeek)))
+  weekend <- matrix(data = NA,
+                    ncol = length(unique(data_long$cluster)),
+                    nrow = length(unique(data_long$weekend)))
+  BDEWSeason <- matrix(data = NA,
+                       ncol = length(unique(data_long$cluster)),
+                       nrow = length(unique(data_long$BDEWSeason)))
+  
+  # fill tables
+  for (i in 1:length(unique(data_long$cluster))) {
+    df <- data_long[data_long[, cluster == i]]
+    # month
+    # month[, i] <-
+    #   table(factor(df$month, levels = 1:12)) /
+    #   table(factor(data_long$month, levels = 1:12))
+    # rownames(month) <- names(table(factor(df$month, levels = 1:12)))
+    # # calenderweek
+    # calendarweek[, i] <-
+    #   table(factor(df$calendarWeek, levels = 1:53)) /
+    #   table(data_long$calendarWeek)
+    # rownames(calendarweek) <- names(table(factor(df$calendarWeek, levels = 1:53)))
+    # # day of the week
+    # weekday[, i] <-
+    #   table(factor(df$dayOfWeek, levels = c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))) /
+    #   table(data_long$dayOfWeek)
+    # rownames(weekday) <-
+    #   names(table(factor(df$dayOfWeek, levels = c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))))
+    # weekend
+    weekend[, i] <-
+      table(factor(df$weekend, levels = c("Saturday", "Sunday", "working day"))) /
+      table(data_long$weekend)
+    rownames(weekend) <- names(table(factor(df$weekend, levels = c("Saturday", "Sunday", "working day"))))
+    # BDEW-Season1
+    BDEWSeason[, i] <-
+      table(factor(df$BDEWSeason, levels = c("Summer", "Transition", "Winter"))) /
+      table(data_long$BDEWSeason)
+    rownames(BDEWSeason) <- names(table(factor(df$BDEWSeason, levels = c("Summer", "Transition", "Winter"))))
+  }
+```
