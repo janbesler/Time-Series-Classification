@@ -1,4 +1,4 @@
-# Advances-Topics
+# Advanced-Topics
 
 This work is part of the module 'Advanced Topics for Data Science' at the University of Tuebingen.
 
